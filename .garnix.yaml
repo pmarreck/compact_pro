@@ -2,3 +2,5 @@ builds:
   include:
     - "checks.x86_64-linux.default"
     - "packages.x86_64-linux.compact-pro-cli"
+    - "checks.aarch64-linux.default"
+    - "packages.aarch64-linux.compact-pro-cli"

@@ -9,6 +9,14 @@
 - C ABI (FFI) for embedding.
 - C CLI named `compact-pro` for all filesystem and platform I/O.
 
+## CI Coverage
+
+- Linux x86_64 (Nix-based full test + build)
+- Linux aarch64 (Nix-based full test + build)
+- macOS aarch64 (Nix-based full test + build)
+- Windows x86_64 (native Zig test + build + CLI smoke test)
+- Windows aarch64 (cross-compile build check + artifact; runtime execution not yet validated on hosted ARM runner)
+
 ## Build
 
 ```bash

@@ -12,6 +12,9 @@
 #if defined(__linux__)
 #include <sys/xattr.h>
 #endif
+#if defined(_WIN32)
+#include <direct.h>
+#endif
 
 #include "compact_pro.h"
 
@@ -77,8 +80,11 @@ static int fail(const char *msg) {
 
 static const char *basename_ptr(const char *path) {
 	const char *slash = strrchr(path, '/');
-	if (slash == NULL) return path;
-	return slash + 1;
+#if defined(_WIN32)
+	const char *bslash = strrchr(path, '\\');
+	if (bslash != NULL && (slash == NULL || bslash > slash)) slash = bslash;
+#endif
+	return slash == NULL ? path : slash + 1;
 }
 
 static char *xstrdup(const char *s) {
@@ -100,18 +106,36 @@ static int ensure_parent_dirs(const char *path) {
 	char *tmp = xstrdup(path);
 	if (tmp == NULL) return fail("out of memory");
 
+#if defined(_WIN32)
+#define PATH_SEP_1 '/'
+#define PATH_SEP_2 '\\'
+#else
+#define PATH_SEP_1 '/'
+#define PATH_SEP_2 '/'
+#endif
+
+#if defined(_WIN32)
+#define MKDIR_PORTABLE(p) _mkdir(p)
+#else
+#define MKDIR_PORTABLE(p) mkdir((p), 0755)
+#endif
+
 	for (char *p = tmp + 1; *p != '\0'; ++p) {
-		if (*p != '/') continue;
+		if (*p != PATH_SEP_1 && *p != PATH_SEP_2) continue;
 		*p = '\0';
-		if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+		if (MKDIR_PORTABLE(tmp) != 0 && errno != EEXIST) {
 			fprintf(stderr, "error: mkdir failed for %s: %s\n", tmp, strerror(errno));
 			free(tmp);
 			return 1;
 		}
-		*p = '/';
+		*p = PATH_SEP_1;
 	}
 
 	free(tmp);
+
+#undef PATH_SEP_1
+#undef PATH_SEP_2
+#undef MKDIR_PORTABLE
 	return 0;
 }
 
@@ -370,6 +394,7 @@ static char *sidecar_path_for(const char *data_path) {
 	return out;
 }
 
+#if defined(__APPLE__)
 static char *namedfork_path_for(const char *data_path) {
 	const char suffix[] = "/..namedfork/rsrc";
 	size_t len = strlen(data_path);
@@ -379,6 +404,7 @@ static char *namedfork_path_for(const char *data_path) {
 	memcpy(out + len, suffix, sizeof(suffix));
 	return out;
 }
+#endif
 
 static int selector_set_mode(selectors *s, rsrc_mode mode, const char *arg) {
 	if (s->mode != RSRC_DEFAULT && s->mode != mode) return fail("resource selector conflict");

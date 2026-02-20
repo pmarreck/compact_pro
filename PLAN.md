@@ -10,8 +10,10 @@
 - [x] Add cross-platform build/test scripts: `./build`, `./test`, plus `./bm` and `./fuzz` placeholders. (completed 2026-02-20 12:00 EST)
 - [x] Add dependency management via `flake.nix` and Garnix + GitHub Actions CI scaffolding. (completed 2026-02-20 12:00 EST)
 - [x] Write `README.md` with CI badges (Garnix + GitHub Actions), project description, and CLI options. (completed 2026-02-20 12:00 EST)
-- [ ] Create/push GitHub repo `compact_pro` via `gh` and confirm badge links resolve against the created remote.
-- [ ] Update `CODE_MINIMAP.md` to reflect all new code/docs.
+- [x] Create/push GitHub repo `compact_pro` via `gh` and confirm badge links resolve against the created remote. (completed 2026-02-20 12:05 EST)
+- [x] Update `CODE_MINIMAP.md` to reflect all new code/docs. (completed 2026-02-20 12:00 EST)
+- [x] Validate Windows target compatibility and fix platform-specific CLI build issues (`x86_64-windows`, `aarch64-windows`). (completed 2026-02-20 12:27 EST)
+- [x] Expand CI coverage matrix to Linux x86_64/aarch64, macOS aarch64, Windows x86_64, and Windows aarch64 cross-compile artifact job. (completed 2026-02-20 12:27 EST)
 
 ## Continuity
 

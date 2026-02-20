@@ -6,12 +6,21 @@ on:
   pull_request:
 
 jobs:
-  test-and-build:
+  nix-test-and-build:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-24.04
+            artifact_name: compact-pro-linux-x86_64
+            artifact_path: zig-out/bin/compact-pro
+          - os: ubuntu-24.04-arm
+            artifact_name: compact-pro-linux-aarch64
+            artifact_path: zig-out/bin/compact-pro
+          - os: macos-14
+            artifact_name: compact-pro-macos-aarch64
+            artifact_path: zig-out/bin/compact-pro
 
     steps:
       - name: Checkout
@@ -29,6 +38,65 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: compact-pro-${{ matrix.os }}
-          path: zig-out/bin/compact-pro
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  windows-x86_64:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Run Zig Unit Tests
+        shell: pwsh
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Build Windows Release Artifact
+        shell: pwsh
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: CLI Smoke Test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .tmp-ci | Out-Null
+          Set-Content -NoNewline -Path .tmp-ci/input.txt -Value "hello from windows"
+          ./zig-out/bin/compact-pro.exe --help
+          ./zig-out/bin/compact-pro.exe compress -o .tmp-ci/a.cpt .tmp-ci/input.txt
+          ./zig-out/bin/compact-pro.exe expand .tmp-ci/a.cpt -d .tmp-ci/out
+          $src = Get-Content -Raw .tmp-ci/input.txt
+          $dst = Get-Content -Raw .tmp-ci/out/input.txt
+          if ($src -ne $dst) { throw "roundtrip mismatch" }
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-pro-windows-x86_64
+          path: zig-out/bin/compact-pro.exe
+          if-no-files-found: error
+
+  windows-arm64-cross-compile:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Cross-Compile Windows ARM64 Artifact (Build-Only)
+        run: nix develop -c zig build -Doptimize=ReleaseFast -Dtarget=aarch64-windows
+
+      - name: Upload Windows ARM64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-pro-windows-aarch64-cross
+          path: zig-out/bin/compact-pro.exe
           if-no-files-found: error

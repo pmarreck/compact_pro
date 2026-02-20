@@ -56,10 +56,10 @@
   - Dependency control and reproducible dev shell/build/check definitions.
 
 - `.garnix.yaml`
-  - Garnix build/check configuration using flake outputs.
+  - Garnix build/check configuration using flake outputs for Linux `x86_64` and `aarch64`.
 
 - `.github/workflows/ci.yml`
-  - GitHub Actions CI on `yolo`: full tests, release build, and downloadable artifacts per platform matrix.
+  - GitHub Actions CI on `yolo`: platform matrix with Linux (`x86_64` + `aarch64`) and macOS (`aarch64`) Nix-based full test/build jobs, Windows `x86_64` native Zig test/build/smoke job, and Windows `aarch64` cross-compile artifact job.
 
 - `build`
   - Project build wrapper (`ReleaseFast` default; `--debug`, `--test` supported).
