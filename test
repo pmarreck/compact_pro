@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+status=0
+
+if ! nix develop -c zig build test -Doptimize=ReleaseFast; then
+	status=1
+fi
+
+if ! nix develop -c bash tests/cli/test_cli.sh; then
+	status=1
+fi
+
+exit "$status"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "fuzz suite not implemented yet" >&2
+exit 0

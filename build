@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+optimize="ReleaseFast"
+extra=()
+
+while (($#)); do
+	case "$1" in
+		--debug)
+			optimize="Debug"
+			shift
+			;;
+		--test)
+			extra+=("test")
+			shift
+			;;
+		*)
+			echo "unknown argument: $1" >&2
+			exit 2
+			;;
+	esac
+done
+
+if ((${#extra[@]} > 0)); then
+	nix develop -c zig build test -Doptimize="$optimize"
+else
+	nix develop -c zig build -Doptimize="$optimize"
+fi

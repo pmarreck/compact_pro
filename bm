@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "benchmark suite not implemented yet" >&2
+exit 0
