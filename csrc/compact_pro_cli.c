@@ -54,8 +54,9 @@ typedef struct {
 	int64_t mtime_unix;
 } meta_record;
 
-static const char *meta_entry_name = ".compact-pro.meta.bin";
 static const uint8_t meta_magic[8] = { 'C', 'P', 'M', 'E', 'T', 'A', '1', '\n' };
+static const uint8_t meta_trailer_magic[8] = { 'C', 'P', 'X', 'T', 'R', 'L', 'R', '1' };
+static const uint32_t meta_trailer_version = 1;
 
 static void print_help(void) {
 	puts("compact-pro");
@@ -235,11 +236,6 @@ static char *join_path(const char *left, const char *right) {
 	return out;
 }
 
-static bool is_meta_entry_name_bytes(const uint8_t *name_ptr, size_t name_len) {
-	size_t meta_len = strlen(meta_entry_name);
-	return name_len == meta_len && memcmp(name_ptr, meta_entry_name, meta_len) == 0;
-}
-
 static void write_u32_le(uint8_t *dst, uint32_t v) {
 	dst[0] = (uint8_t)(v & 0xFFu);
 	dst[1] = (uint8_t)((v >> 8) & 0xFFu);
@@ -340,6 +336,69 @@ static int parse_metadata_blob(const uint8_t *blob, size_t blob_len, meta_record
 	*out_records = records;
 	*out_count = (size_t)count_u32;
 	return 0;
+}
+
+static int append_metadata_trailer(
+	const uint8_t *archive,
+	size_t archive_len,
+	const uint8_t *meta_blob,
+	size_t meta_blob_len,
+	uint8_t **out_archive,
+	size_t *out_len
+) {
+	*out_archive = NULL;
+	*out_len = 0;
+	const size_t footer_len = 8 + 4 + 4;
+	size_t total_len = archive_len + meta_blob_len + footer_len;
+	uint8_t *buf = (uint8_t *)malloc(total_len);
+	if (buf == NULL) return fail("out of memory");
+
+	size_t off = 0;
+	memcpy(buf + off, archive, archive_len);
+	off += archive_len;
+	memcpy(buf + off, meta_blob, meta_blob_len);
+	off += meta_blob_len;
+	memcpy(buf + off, meta_trailer_magic, 8);
+	off += 8;
+	write_u32_le(buf + off, (uint32_t)meta_blob_len);
+	off += 4;
+	write_u32_le(buf + off, meta_trailer_version);
+	off += 4;
+
+	*out_archive = buf;
+	*out_len = off;
+	return 0;
+}
+
+static void split_archive_and_metadata(
+	const uint8_t *archive,
+	size_t archive_len,
+	const uint8_t **base_archive,
+	size_t *base_archive_len,
+	const uint8_t **meta_blob,
+	size_t *meta_blob_len
+) {
+	*base_archive = archive;
+	*base_archive_len = archive_len;
+	*meta_blob = NULL;
+	*meta_blob_len = 0;
+
+	const size_t footer_len = 8 + 4 + 4;
+	if (archive_len < footer_len) return;
+	size_t footer_at = archive_len - footer_len;
+	if (memcmp(archive + footer_at, meta_trailer_magic, 8) != 0) return;
+
+	uint32_t payload_len_u32 = read_u32_le(archive + footer_at + 8);
+	uint32_t version_u32 = read_u32_le(archive + footer_at + 12);
+	if (version_u32 != meta_trailer_version) return;
+
+	size_t payload_len = (size_t)payload_len_u32;
+	if (payload_len > footer_at) return;
+	size_t payload_at = footer_at - payload_len;
+
+	*base_archive_len = payload_at;
+	*meta_blob = archive + payload_at;
+	*meta_blob_len = payload_len;
 }
 
 static const meta_record *find_meta_record(const meta_record *records, size_t count, const uint8_t *name_ptr, size_t name_len) {
@@ -697,35 +756,29 @@ static int cmd_compress(int argc, char **argv) {
 	}
 	free(meta_sources);
 
-	cp_entry_input *all_entries = (cp_entry_input *)calloc(input_count + 1, sizeof(*all_entries));
-	if (all_entries == NULL) {
-		free(meta_blob);
-		free_built_entries(entries, owned, input_count);
-		free(inputs);
-		return fail("out of memory");
-	}
-	memcpy(all_entries, entries, input_count * sizeof(*entries));
-	all_entries[input_count].name_ptr = (const uint8_t *)meta_entry_name;
-	all_entries[input_count].name_len = strlen(meta_entry_name);
-	all_entries[input_count].data_ptr = meta_blob;
-	all_entries[input_count].data_len = meta_blob_len;
-	all_entries[input_count].resource_ptr = NULL;
-	all_entries[input_count].resource_len = 0;
-
 	cp_buffer archive = {0};
-	int rc = cp_archive_create(all_entries, input_count + 1, NULL, 0, &archive);
+	int rc = cp_archive_create(entries, input_count, NULL, 0, &archive);
 	if (rc != CP_OK) {
 		fprintf(stderr, "error: cp_archive_create failed: %s\n", cp_error_string(rc));
-		free(all_entries);
 		free(meta_blob);
 		free_built_entries(entries, owned, input_count);
 		free(inputs);
 		return 1;
 	}
 
-	int write_rc = write_file(output_path, archive.ptr, archive.len);
+	uint8_t *archive_with_meta = NULL;
+	size_t archive_with_meta_len = 0;
+	if (append_metadata_trailer(archive.ptr, archive.len, meta_blob, meta_blob_len, &archive_with_meta, &archive_with_meta_len) != 0) {
+		cp_buffer_free(&archive);
+		free(meta_blob);
+		free_built_entries(entries, owned, input_count);
+		free(inputs);
+		return 1;
+	}
+
+	int write_rc = write_file(output_path, archive_with_meta, archive_with_meta_len);
 	cp_buffer_free(&archive);
-	free(all_entries);
+	free(archive_with_meta);
 	free(meta_blob);
 	free_built_entries(entries, owned, input_count);
 	free(inputs);
@@ -818,35 +871,30 @@ static int cmd_expand(int argc, char **argv) {
 		return 1;
 	}
 
-	cp_archive_output extracted = {0};
-	int rc = cp_archive_extract(archive_bytes, archive_len, 1, &extracted);
-	free(archive_bytes);
-	if (rc != CP_OK) {
-		fprintf(stderr, "error: cp_archive_extract failed: %s\n", cp_error_string(rc));
+	const uint8_t *base_archive = archive_bytes;
+	size_t base_archive_len = archive_len;
+	const uint8_t *meta_blob = NULL;
+	size_t meta_blob_len = 0;
+	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob, &meta_blob_len);
+
+	meta_record *meta_records = NULL;
+	size_t meta_count = 0;
+	if (meta_blob != NULL && parse_metadata_blob(meta_blob, meta_blob_len, &meta_records, &meta_count) != 0) {
+		free(archive_bytes);
 		free(paths);
 		free(path_found);
 		return 1;
 	}
 
-	meta_record *meta_records = NULL;
-	size_t meta_count = 0;
-	for (size_t i = 0; i < extracted.entry_count; ++i) {
-		cp_entry_output *entry = &extracted.entries_ptr[i];
-		if (!is_meta_entry_name_bytes(entry->name_ptr, entry->name_len)) continue;
-		if (parse_metadata_blob(entry->data_ptr, entry->data_len, &meta_records, &meta_count) != 0) {
-			cp_archive_output_free(&extracted);
-			free(paths);
-			free(path_found);
-			return 1;
-		}
-		break;
-	}
-
-	size_t visible_count = 0;
-	for (size_t i = 0; i < extracted.entry_count; ++i) {
-		cp_entry_output *entry = &extracted.entries_ptr[i];
-		if (is_meta_entry_name_bytes(entry->name_ptr, entry->name_len)) continue;
-		visible_count++;
+	cp_archive_output extracted = {0};
+	int rc = cp_archive_extract(base_archive, base_archive_len, 1, &extracted);
+	free(archive_bytes);
+	if (rc != CP_OK) {
+		fprintf(stderr, "error: cp_archive_extract failed: %s\n", cp_error_string(rc));
+		free_meta_records(meta_records, meta_count);
+		free(paths);
+		free(path_found);
+		return 1;
 	}
 
 	if (s.mode == RSRC_EXPLICIT && path_count > 1) {
@@ -856,7 +904,7 @@ static int cmd_expand(int argc, char **argv) {
 		free(path_found);
 		return fail("--rsrc supports one output path target");
 	}
-	if (s.mode == RSRC_EXPLICIT && path_count == 0 && visible_count != 1) {
+	if (s.mode == RSRC_EXPLICIT && path_count == 0 && extracted.entry_count != 1) {
 		cp_archive_output_free(&extracted);
 		free_meta_records(meta_records, meta_count);
 		free(paths);
@@ -866,7 +914,6 @@ static int cmd_expand(int argc, char **argv) {
 
 	for (size_t i = 0; i < extracted.entry_count; ++i) {
 		cp_entry_output *entry = &extracted.entries_ptr[i];
-		if (is_meta_entry_name_bytes(entry->name_ptr, entry->name_len)) continue;
 		if (path_count > 0) {
 			bool matched = false;
 			for (size_t p = 0; p < path_count; ++p) {
@@ -1008,44 +1055,43 @@ static int cmd_add(int argc, char **argv) {
 		return 1;
 	}
 
-	cp_entry_input *entries = NULL;
-	input_owned *owned = NULL;
-	if (build_entries_from_inputs(&s, inputs, input_count, &entries, &owned) != 0) {
+	const uint8_t *base_archive = archive_bytes;
+	size_t base_archive_len = archive_len;
+	const uint8_t *meta_blob_in = NULL;
+	size_t meta_blob_in_len = 0;
+	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob_in, &meta_blob_in_len);
+
+	meta_record *old_meta = NULL;
+	size_t old_meta_count = 0;
+	if (meta_blob_in != NULL && parse_metadata_blob(meta_blob_in, meta_blob_in_len, &old_meta, &old_meta_count) != 0) {
 		free(archive_bytes);
 		free(inputs);
 		return 1;
 	}
 
+	cp_entry_input *entries = NULL;
+	input_owned *owned = NULL;
+	if (build_entries_from_inputs(&s, inputs, input_count, &entries, &owned) != 0) {
+		free(archive_bytes);
+		free_meta_records(old_meta, old_meta_count);
+		free(inputs);
+		return 1;
+	}
+
 	cp_archive_output existing = {0};
-	int rc = cp_archive_extract(archive_bytes, archive_len, 1, &existing);
+	int rc = cp_archive_extract(base_archive, base_archive_len, 1, &existing);
 	free(archive_bytes);
 	if (rc != CP_OK) {
 		fprintf(stderr, "error: cp_archive_extract failed: %s\n", cp_error_string(rc));
+		free_meta_records(old_meta, old_meta_count);
 		free_built_entries(entries, owned, input_count);
 		free(inputs);
 		return 1;
 	}
 
-	meta_record *old_meta = NULL;
-	size_t old_meta_count = 0;
-	size_t existing_visible_count = 0;
-	for (size_t i = 0; i < existing.entry_count; ++i) {
-		cp_entry_output *entry = &existing.entries_ptr[i];
-		if (is_meta_entry_name_bytes(entry->name_ptr, entry->name_len)) {
-			if (parse_metadata_blob(entry->data_ptr, entry->data_len, &old_meta, &old_meta_count) != 0) {
-				cp_archive_output_free(&existing);
-				free_built_entries(entries, owned, input_count);
-				free(inputs);
-				return 1;
-			}
-			continue;
-		}
-		existing_visible_count++;
-	}
-
-	size_t combined_count_without_meta = existing_visible_count + input_count;
-	meta_source *sources = (meta_source *)calloc(combined_count_without_meta, sizeof(*sources));
-	cp_entry_input *combined = (cp_entry_input *)calloc(combined_count_without_meta + 1, sizeof(*combined));
+	size_t combined_count = existing.entry_count + input_count;
+	meta_source *sources = (meta_source *)calloc(combined_count, sizeof(*sources));
+	cp_entry_input *combined = (cp_entry_input *)calloc(combined_count, sizeof(*combined));
 	if (sources == NULL || combined == NULL) {
 		free(sources);
 		free(combined);
@@ -1059,7 +1105,6 @@ static int cmd_add(int argc, char **argv) {
 	size_t out_idx = 0;
 	for (size_t i = 0; i < existing.entry_count; ++i) {
 		cp_entry_output *entry = &existing.entries_ptr[i];
-		if (is_meta_entry_name_bytes(entry->name_ptr, entry->name_len)) continue;
 		combined[out_idx].name_ptr = entry->name_ptr;
 		combined[out_idx].name_len = entry->name_len;
 		combined[out_idx].data_ptr = entry->data_ptr;
@@ -1089,9 +1134,9 @@ static int cmd_add(int argc, char **argv) {
 		out_idx++;
 	}
 
-	uint8_t *meta_blob = NULL;
-	size_t meta_blob_len = 0;
-	if (build_metadata_blob(sources, combined_count_without_meta, &meta_blob, &meta_blob_len) != 0) {
+	uint8_t *meta_blob_out = NULL;
+	size_t meta_blob_out_len = 0;
+	if (build_metadata_blob(sources, combined_count, &meta_blob_out, &meta_blob_out_len) != 0) {
 		free(sources);
 		free(combined);
 		free_meta_records(old_meta, old_meta_count);
@@ -1102,28 +1147,35 @@ static int cmd_add(int argc, char **argv) {
 	}
 	free(sources);
 
-	combined[combined_count_without_meta].name_ptr = (const uint8_t *)meta_entry_name;
-	combined[combined_count_without_meta].name_len = strlen(meta_entry_name);
-	combined[combined_count_without_meta].data_ptr = meta_blob;
-	combined[combined_count_without_meta].data_len = meta_blob_len;
-	combined[combined_count_without_meta].resource_ptr = NULL;
-	combined[combined_count_without_meta].resource_len = 0;
-
 	cp_buffer out_archive = {0};
-	rc = cp_archive_create(combined, combined_count_without_meta + 1, existing.comment_ptr, existing.comment_len, &out_archive);
+	rc = cp_archive_create(combined, combined_count, existing.comment_ptr, existing.comment_len, &out_archive);
 	free(combined);
-	free(meta_blob);
 	free_meta_records(old_meta, old_meta_count);
-	cp_archive_output_free(&existing);
 	if (rc != CP_OK) {
 		fprintf(stderr, "error: cp_archive_create failed: %s\n", cp_error_string(rc));
+		free(meta_blob_out);
+		cp_archive_output_free(&existing);
 		free_built_entries(entries, owned, input_count);
 		free(inputs);
 		return 1;
 	}
 
-	int write_rc = write_file(archive_path, out_archive.ptr, out_archive.len);
+	uint8_t *archive_with_meta = NULL;
+	size_t archive_with_meta_len = 0;
+	if (append_metadata_trailer(out_archive.ptr, out_archive.len, meta_blob_out, meta_blob_out_len, &archive_with_meta, &archive_with_meta_len) != 0) {
+		cp_buffer_free(&out_archive);
+		free(meta_blob_out);
+		cp_archive_output_free(&existing);
+		free_built_entries(entries, owned, input_count);
+		free(inputs);
+		return 1;
+	}
+
+	int write_rc = write_file(archive_path, archive_with_meta, archive_with_meta_len);
+	free(archive_with_meta);
 	cp_buffer_free(&out_archive);
+	free(meta_blob_out);
+	cp_archive_output_free(&existing);
 	free_built_entries(entries, owned, input_count);
 	free(inputs);
 	return write_rc;
@@ -1144,8 +1196,16 @@ static int cmd_list(int argc, char **argv) {
 	size_t archive_len = 0;
 	if (read_file_required(archive_path, &archive_bytes, &archive_len) != 0) return 1;
 
+	const uint8_t *base_archive = archive_bytes;
+	size_t base_archive_len = archive_len;
+	const uint8_t *meta_blob = NULL;
+	size_t meta_blob_len = 0;
+	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob, &meta_blob_len);
+	(void)meta_blob;
+	(void)meta_blob_len;
+
 	cp_archive_listing listing = {0};
-	int rc = cp_archive_list(archive_bytes, archive_len, 1, &listing);
+	int rc = cp_archive_list(base_archive, base_archive_len, 1, &listing);
 	free(archive_bytes);
 	if (rc != CP_OK) {
 		fprintf(stderr, "error: cp_archive_list failed: %s\n", cp_error_string(rc));
@@ -1154,7 +1214,6 @@ static int cmd_list(int argc, char **argv) {
 
 	for (size_t i = 0; i < listing.entry_count; ++i) {
 		cp_list_entry *entry = &listing.entries_ptr[i];
-		if (is_meta_entry_name_bytes(entry->name_ptr, entry->name_len)) continue;
 		char *name = copy_name(entry->name_ptr, entry->name_len);
 		if (name == NULL) {
 			cp_archive_listing_free(&listing);

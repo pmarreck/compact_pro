@@ -66,13 +66,15 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path .tmp-ci | Out-Null
-          Set-Content -NoNewline -Path .tmp-ci/input.txt -Value "hello from windows"
-          ./zig-out/bin/compact-pro.exe --help
-          ./zig-out/bin/compact-pro.exe compress -o .tmp-ci/a.cpt .tmp-ci/input.txt
-          ./zig-out/bin/compact-pro.exe expand .tmp-ci/a.cpt -d .tmp-ci/out
-          $src = Get-Content -Raw .tmp-ci/input.txt
-          $dst = Get-Content -Raw .tmp-ci/out/input.txt
-          if ($src -ne $dst) { throw "roundtrip mismatch" }
+          Push-Location .tmp-ci
+          Set-Content -NoNewline -Encoding utf8NoBOM -Path input.txt -Value "hello from windows"
+          ../zig-out/bin/compact-pro.exe --help
+          ../zig-out/bin/compact-pro.exe compress -o a.cpt input.txt
+          ../zig-out/bin/compact-pro.exe expand a.cpt -d out
+          $srcHash = (Get-FileHash -Algorithm SHA256 input.txt).Hash
+          $dstHash = (Get-FileHash -Algorithm SHA256 out/input.txt).Hash
+          if ($srcHash -ne $dstHash) { throw "roundtrip mismatch" }
+          Pop-Location
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4

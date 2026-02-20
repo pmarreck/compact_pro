@@ -40,7 +40,7 @@
   - CLI command parser and implementations for `compress`, `expand`, `add`, `list`.
   - Performs all file/resource-fork I/O.
   - Implements `expand --path` selective extraction.
-  - Implements metadata extension (`.compact-pro.meta.bin`) capture/restore with warning behavior on restore failures.
+  - Implements appended metadata trailer extension capture/restore with warning behavior on restore failures.
 
 - `tests/unit/zig_unit_tests.zig`
   - Unit tests for RLE behavior, archive roundtrip/create/add, and fixture metadata parse.
