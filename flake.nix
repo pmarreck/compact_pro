@@ -27,6 +27,10 @@
 					git
 					gh
 					bash
+					hyperfine
+					zip
+					unzip
+					gzip
 				];
 			};
 		});

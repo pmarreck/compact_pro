@@ -1,5 +1,280 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "benchmark suite not implemented yet" >&2
-exit 0
+if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+	exec nix develop -c "$0" "$@"
+fi
+
+accept=0
+runs=6
+drift_threshold_pct=20
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--accept)
+			accept=1
+			shift
+			;;
+		--runs)
+			if [[ $# -lt 2 ]]; then
+				echo "error: --runs requires a value" >&2
+				exit 1
+			fi
+			runs="$2"
+			shift 2
+			;;
+		--threshold)
+			if [[ $# -lt 2 ]]; then
+				echo "error: --threshold requires a percentage value" >&2
+				exit 1
+			fi
+			drift_threshold_pct="$2"
+			shift 2
+			;;
+		-h|--help)
+			cat <<'EOF'
+Usage: ./bm [--accept] [--runs N] [--threshold PCT]
+
+Benchmark compact-pro vs zip/gzip for:
+- compression speed (wall + cpu)
+- extraction speed (wall + cpu)
+- compression ratio
+
+Writes history to tests/benchmark/history.tsv and fails loudly on sudden drift.
+Use --accept (or BENCH_ACCEPT=1) to accept a new baseline.
+EOF
+			exit 0
+			;;
+		*)
+			echo "error: unknown argument: $1" >&2
+			exit 1
+			;;
+	esac
+done
+
+if [[ "${BENCH_ACCEPT:-0}" == "1" ]]; then
+	accept=1
+fi
+
+for cmd in hyperfine zip unzip gzip awk sed wc date tail; do
+	if ! command -v "$cmd" >/dev/null 2>&1; then
+		echo "error: required command missing: $cmd" >&2
+		exit 1
+	fi
+done
+
+zig build -Doptimize=ReleaseFast >/dev/null
+if ./zig-out/bin/compact-pro --help 2>&1 | rg -q "DEBUG BUILD"; then
+	echo "error: benchmark refused to run DEBUG build" >&2
+	exit 1
+fi
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/compact-pro-bm.XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+input_file="$tmp_dir/input.dat"
+input_basename="$(basename "$input_file")"
+target_bytes=$((16 * 1024 * 1024))
+dd if=/dev/zero bs=1048576 count=16 status=none | tr '\0' 'A' >"$input_file"
+input_bytes="$(wc -c < "$input_file" | tr -d '[:space:]')"
+
+compress_csv="$tmp_dir/compress.csv"
+extract_csv="$tmp_dir/extract.csv"
+
+hyperfine \
+	--warmup 1 \
+	--runs "$runs" \
+	--export-csv "$compress_csv" \
+	--prepare "rm -f '$tmp_dir/out.cpt' '$tmp_dir/out.zip' '$tmp_dir/out.gz'" \
+	--command-name "compact-pro" "./zig-out/bin/compact-pro compress --no-progress -o '$tmp_dir/out.cpt' '$input_file'" \
+	--command-name "zip" "zip -q -j '$tmp_dir/out.zip' '$input_file'" \
+	--command-name "gzip" "gzip -c '$input_file' > '$tmp_dir/out.gz'"
+
+./zig-out/bin/compact-pro compress --no-progress -o "$tmp_dir/out.cpt" "$input_file" >/dev/null
+zip -q -j "$tmp_dir/out.zip" "$input_file"
+gzip -c "$input_file" >"$tmp_dir/out.gz"
+
+hyperfine \
+	--warmup 1 \
+	--runs "$runs" \
+	--export-csv "$extract_csv" \
+	--prepare "rm -rf '$tmp_dir/x-cpt' '$tmp_dir/x-zip' '$tmp_dir/x-gzip'; mkdir -p '$tmp_dir/x-gzip'" \
+	--command-name "compact-pro" "./zig-out/bin/compact-pro expand --no-progress '$tmp_dir/out.cpt' -d '$tmp_dir/x-cpt'" \
+	--command-name "zip" "unzip -qq '$tmp_dir/out.zip' -d '$tmp_dir/x-zip'" \
+	--command-name "gzip" "gzip -dc '$tmp_dir/out.gz' > '$tmp_dir/x-gzip/$input_basename'"
+
+csv_get() {
+	local csv="$1"
+	local command_name="$2"
+	local column_name="$3"
+	awk -F, -v cmd="$command_name" -v col="$column_name" '
+NR==1 {
+	for (i = 1; i <= NF; ++i) {
+		key = $i
+		gsub(/"/, "", key)
+		col_idx[key] = i
+	}
+	next
+}
+{
+	name = $1
+	gsub(/"/, "", name)
+	if (name == cmd) {
+		if (col_idx[col] > 0) {
+			val = $(col_idx[col])
+			gsub(/"/, "", val)
+			print val
+		}
+		exit
+	}
+}
+' "$csv"
+}
+
+num_or_zero() {
+	local v="${1:-}"
+	if [[ "$v" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+		echo "$v"
+	else
+		echo "0"
+	fi
+}
+
+calc_ratio() {
+	local out_bytes="$1"
+	local in_bytes="$2"
+	awk -v out="$out_bytes" -v inb="$in_bytes" 'BEGIN { if (inb == 0) printf "0"; else printf "%.6f", out / inb }'
+}
+
+calc_mib_s() {
+	local bytes="$1"
+	local seconds="$2"
+	awk -v b="$bytes" -v s="$seconds" 'BEGIN { if (s == 0) printf "0"; else printf "%.3f", (b / 1048576.0) / s }'
+}
+
+check_drift() {
+	local label="$1"
+	local old="$2"
+	local now="$3"
+	local abs_pct
+	abs_pct="$(awk -v old="$old" -v now="$now" 'BEGIN {
+		if (old == 0) { print 0; exit }
+		d = ((now - old) / old) * 100.0
+		if (d < 0) d = -d
+		printf "%.3f", d
+	}')"
+	if awk -v d="$abs_pct" -v t="$drift_threshold_pct" 'BEGIN { exit !(d > t) }'; then
+		echo "BENCH DRIFT: $label changed by ${abs_pct}% (prev=$old, now=$now)" >&2
+		return 1
+	fi
+	return 0
+}
+
+cpt_comp_wall="$(num_or_zero "$(csv_get "$compress_csv" "compact-pro" "mean")")"
+zip_comp_wall="$(num_or_zero "$(csv_get "$compress_csv" "zip" "mean")")"
+gzip_comp_wall="$(num_or_zero "$(csv_get "$compress_csv" "gzip" "mean")")"
+cpt_comp_user="$(num_or_zero "$(csv_get "$compress_csv" "compact-pro" "user")")"
+zip_comp_user="$(num_or_zero "$(csv_get "$compress_csv" "zip" "user")")"
+gzip_comp_user="$(num_or_zero "$(csv_get "$compress_csv" "gzip" "user")")"
+cpt_comp_sys="$(num_or_zero "$(csv_get "$compress_csv" "compact-pro" "system")")"
+zip_comp_sys="$(num_or_zero "$(csv_get "$compress_csv" "zip" "system")")"
+gzip_comp_sys="$(num_or_zero "$(csv_get "$compress_csv" "gzip" "system")")"
+
+cpt_ext_wall="$(num_or_zero "$(csv_get "$extract_csv" "compact-pro" "mean")")"
+zip_ext_wall="$(num_or_zero "$(csv_get "$extract_csv" "zip" "mean")")"
+gzip_ext_wall="$(num_or_zero "$(csv_get "$extract_csv" "gzip" "mean")")"
+cpt_ext_user="$(num_or_zero "$(csv_get "$extract_csv" "compact-pro" "user")")"
+zip_ext_user="$(num_or_zero "$(csv_get "$extract_csv" "zip" "user")")"
+gzip_ext_user="$(num_or_zero "$(csv_get "$extract_csv" "gzip" "user")")"
+cpt_ext_sys="$(num_or_zero "$(csv_get "$extract_csv" "compact-pro" "system")")"
+zip_ext_sys="$(num_or_zero "$(csv_get "$extract_csv" "zip" "system")")"
+gzip_ext_sys="$(num_or_zero "$(csv_get "$extract_csv" "gzip" "system")")"
+
+cpt_size="$(wc -c < "$tmp_dir/out.cpt" | tr -d '[:space:]')"
+zip_size="$(wc -c < "$tmp_dir/out.zip" | tr -d '[:space:]')"
+gzip_size="$(wc -c < "$tmp_dir/out.gz" | tr -d '[:space:]')"
+cpt_ratio="$(calc_ratio "$cpt_size" "$input_bytes")"
+zip_ratio="$(calc_ratio "$zip_size" "$input_bytes")"
+gzip_ratio="$(calc_ratio "$gzip_size" "$input_bytes")"
+
+cpt_comp_mibs="$(calc_mib_s "$input_bytes" "$cpt_comp_wall")"
+zip_comp_mibs="$(calc_mib_s "$input_bytes" "$zip_comp_wall")"
+gzip_comp_mibs="$(calc_mib_s "$input_bytes" "$gzip_comp_wall")"
+cpt_ext_mibs="$(calc_mib_s "$input_bytes" "$cpt_ext_wall")"
+zip_ext_mibs="$(calc_mib_s "$input_bytes" "$zip_ext_wall")"
+gzip_ext_mibs="$(calc_mib_s "$input_bytes" "$gzip_ext_wall")"
+
+printf "Benchmark summary (input=%s bytes)\n" "$input_bytes"
+printf "compress wall(s): compact-pro=%s zip=%s gzip=%s\n" "$cpt_comp_wall" "$zip_comp_wall" "$gzip_comp_wall"
+printf "compress cpu user/system(s): compact-pro=%s/%s zip=%s/%s gzip=%s/%s\n" \
+	"$cpt_comp_user" "$cpt_comp_sys" "$zip_comp_user" "$zip_comp_sys" "$gzip_comp_user" "$gzip_comp_sys"
+printf "extract wall(s): compact-pro=%s zip=%s gzip=%s\n" "$cpt_ext_wall" "$zip_ext_wall" "$gzip_ext_wall"
+printf "extract cpu user/system(s): compact-pro=%s/%s zip=%s/%s gzip=%s/%s\n" \
+	"$cpt_ext_user" "$cpt_ext_sys" "$zip_ext_user" "$zip_ext_sys" "$gzip_ext_user" "$gzip_ext_sys"
+printf "sizes(bytes): compact-pro=%s zip=%s gzip=%s\n" "$cpt_size" "$zip_size" "$gzip_size"
+printf "ratio(out/in): compact-pro=%s zip=%s gzip=%s\n" "$cpt_ratio" "$zip_ratio" "$gzip_ratio"
+printf "throughput MiB/s compress: compact-pro=%s zip=%s gzip=%s\n" "$cpt_comp_mibs" "$zip_comp_mibs" "$gzip_comp_mibs"
+printf "throughput MiB/s extract: compact-pro=%s zip=%s gzip=%s\n" "$cpt_ext_mibs" "$zip_ext_mibs" "$gzip_ext_mibs"
+
+log_dir="tests/benchmark"
+log_file="$log_dir/history.tsv"
+mkdir -p "$log_dir"
+if [[ ! -f "$log_file" ]]; then
+	cat >"$log_file" <<'EOF'
+timestamp_utc	input_bytes	runs	cpt_comp_wall_s	zip_comp_wall_s	gzip_comp_wall_s	cpt_comp_user_s	zip_comp_user_s	gzip_comp_user_s	cpt_comp_sys_s	zip_comp_sys_s	gzip_comp_sys_s	cpt_ext_wall_s	zip_ext_wall_s	gzip_ext_wall_s	cpt_ext_user_s	zip_ext_user_s	gzip_ext_user_s	cpt_ext_sys_s	zip_ext_sys_s	gzip_ext_sys_s	cpt_size_bytes	zip_size_bytes	gzip_size_bytes	cpt_ratio	zip_ratio	gzip_ratio	cpt_comp_mib_s	zip_comp_mib_s	gzip_comp_mib_s	cpt_ext_mib_s	zip_ext_mib_s	gzip_ext_mib_s
+EOF
+fi
+
+prev_line="$(tail -n 1 "$log_file")"
+if [[ "$prev_line" == timestamp_utc* ]]; then
+	prev_line=""
+fi
+
+drift_fail=0
+if [[ -n "$prev_line" ]]; then
+	IFS=$'\t' read -r \
+		prev_timestamp prev_input prev_runs \
+		prev_cpt_comp_wall prev_zip_comp_wall prev_gzip_comp_wall \
+		prev_cpt_comp_user prev_zip_comp_user prev_gzip_comp_user \
+		prev_cpt_comp_sys prev_zip_comp_sys prev_gzip_comp_sys \
+		prev_cpt_ext_wall prev_zip_ext_wall prev_gzip_ext_wall \
+		prev_cpt_ext_user prev_zip_ext_user prev_gzip_ext_user \
+		prev_cpt_ext_sys prev_zip_ext_sys prev_gzip_ext_sys \
+		prev_cpt_size prev_zip_size prev_gzip_size \
+		prev_cpt_ratio prev_zip_ratio prev_gzip_ratio \
+		prev_cpt_comp_mibs prev_zip_comp_mibs prev_gzip_comp_mibs \
+		prev_cpt_ext_mibs prev_zip_ext_mibs prev_gzip_ext_mibs <<<"$prev_line"
+
+	check_drift "cpt_comp_wall_s" "$prev_cpt_comp_wall" "$cpt_comp_wall" || drift_fail=1
+	check_drift "cpt_comp_user_s" "$prev_cpt_comp_user" "$cpt_comp_user" || drift_fail=1
+	check_drift "cpt_comp_sys_s" "$prev_cpt_comp_sys" "$cpt_comp_sys" || drift_fail=1
+	check_drift "cpt_ext_wall_s" "$prev_cpt_ext_wall" "$cpt_ext_wall" || drift_fail=1
+	check_drift "cpt_ext_user_s" "$prev_cpt_ext_user" "$cpt_ext_user" || drift_fail=1
+	check_drift "cpt_ext_sys_s" "$prev_cpt_ext_sys" "$cpt_ext_sys" || drift_fail=1
+	check_drift "cpt_ratio" "$prev_cpt_ratio" "$cpt_ratio" || drift_fail=1
+	check_drift "zip_comp_wall_s" "$prev_zip_comp_wall" "$zip_comp_wall" || drift_fail=1
+	check_drift "gzip_comp_wall_s" "$prev_gzip_comp_wall" "$gzip_comp_wall" || drift_fail=1
+	check_drift "zip_ratio" "$prev_zip_ratio" "$zip_ratio" || drift_fail=1
+	check_drift "gzip_ratio" "$prev_gzip_ratio" "$gzip_ratio" || drift_fail=1
+fi
+
+if [[ "$drift_fail" -ne 0 && "$accept" -ne 1 ]]; then
+	echo "benchmark drift exceeded ${drift_threshold_pct}% threshold; rerun with --accept or BENCH_ACCEPT=1 to accept new baseline" >&2
+	exit 1
+fi
+
+timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+	"$timestamp_utc" "$input_bytes" "$runs" \
+	"$cpt_comp_wall" "$zip_comp_wall" "$gzip_comp_wall" \
+	"$cpt_comp_user" "$zip_comp_user" "$gzip_comp_user" \
+	"$cpt_comp_sys" "$zip_comp_sys" "$gzip_comp_sys" \
+	"$cpt_ext_wall" "$zip_ext_wall" "$gzip_ext_wall" \
+	"$cpt_ext_user" "$zip_ext_user" "$gzip_ext_user" \
+	"$cpt_ext_sys" "$zip_ext_sys" "$gzip_ext_sys" \
+	"$cpt_size" "$zip_size" "$gzip_size" \
+	"$cpt_ratio" "$zip_ratio" "$gzip_ratio" \
+	"$cpt_comp_mibs" "$zip_comp_mibs" "$gzip_comp_mibs" \
+	"$cpt_ext_mibs" "$zip_ext_mibs" "$gzip_ext_mibs" >>"$log_file"
+
+echo "benchmark history updated: $log_file"

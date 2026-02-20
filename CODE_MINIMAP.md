@@ -18,10 +18,15 @@
 
 - `src/rle8182.zig`
   - Compact Pro RLE (`0x81/0x82`) encoder/decoder.
+  - Encoder now emits repeat-run opcodes for repeated non-`0x81` bytes (thresholded to avoid size regressions on short runs).
+  - Encoder `0x81` path now handles arbitrary runs of `0x81` bytes correctly (including `0x81,0x81,0x81,0x82` patterns) to avoid decode drift/checksum failures in external tools.
+  - Decoder now writes into preallocated output and fills repeat runs in chunks to reduce extraction-time overhead.
 
 - `src/core.zig`
   - Pure archive engine: metadata parser, recursive entry parsing (directories/files), extraction, archive creation, and add semantics.
   - Writer supports directory-structured entry encoding from slash-delimited archive paths.
+  - Parser/writer now use legacy Compact Pro subtree-count semantics for root/directory entry counts (not immediate-child counts), improving external-tool compatibility.
+  - Header CRC validation/generation now covers the full metadata envelope expected by legacy tooling: entry count, comment, and all serialized entry records up to payload start.
   - Returns explicit unsupported errors for encrypted/LZH decode paths.
 
 - `src/ffi.zig`
@@ -39,14 +44,21 @@
 - `csrc/compact_pro_cli.c`
   - CLI command parser and implementations for `compress`, `expand`, `add`, `list`.
   - Performs all file/resource-fork I/O.
+  - `compress`/`add` recursively expand directory inputs into file entries (including paths containing spaces).
+  - `compress` defaults to no-clobber output and supports `--force`/`-f` for explicit overwrite.
+  - Captures directory metadata recursively from directory inputs (including empty directories) and recreates metadata-recorded empty directories on expand.
+  - `compress`/`expand` print completion stats to stderr (bytes, ratio/percent, MB/s, elapsed).
   - Implements `expand --path` selective extraction.
-  - Implements appended metadata trailer extension capture/restore with warning behavior on restore failures.
+  - Implements appended metadata trailer v2 with hierarchical file/dir metadata records and per-field masks.
+  - Restores metadata best-effort and emits explicit per-field warnings for unsupported/unrestorable fields (including cross-OS NTFS/Apple metadata cases).
+  - `list` prints trailer size accounting (`trailer_size`, `trailer_payload`) in addition to normal entries.
+  - `compress` supports optional `-o` (default archive naming), `~` path expansion, auto `.cpt` suffix for named outputs, stdin input via `-`, and stdout output via `-`.
 
 - `tests/unit/zig_unit_tests.zig`
-  - Unit tests for RLE behavior, archive roundtrip/create/add, and fixture metadata parse.
+  - Unit tests for RLE behavior (including repeated-byte compression and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
 
 - `tests/cli/test_cli.sh`
-  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip, and metadata mode restoration.
+  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, progress flags, trailer accounting output, and cross-OS metadata warning behavior.
 
 - `build.zig`
   - Zig build graph for static library, CLI executable, and unit-test step.
@@ -68,7 +80,9 @@
   - Full deterministic suite runner (Zig unit tests + CLI integration tests).
 
 - `bm`
-  - Benchmark entrypoint placeholder.
+  - Benchmark suite comparing `compact-pro` against `zip` and `gzip`.
+  - Measures compression/extraction speed (wall + CPU + throughput) and compression ratio.
+  - Writes history to `tests/benchmark/history.tsv` and fails on sudden drift unless explicitly accepted.
 
 - `fuzz`
   - Fuzz entrypoint placeholder.

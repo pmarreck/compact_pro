@@ -76,6 +76,7 @@ pub const Error = error{
 	Truncated,
 	InvalidHeaderOffset,
 	HeaderCrcMismatch,
+	InvalidEntryCount,
 	UnsupportedEncryptedEntry,
 	UnsupportedLzhEntry,
 	InvalidNameLength,
@@ -177,12 +178,6 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 	const entry_count = try reader.readU16();
 	const comment_len = try reader.readU8();
 	const comment_src = try reader.readSlice(comment_len);
-	const crc_end = reader.index;
-
-	if (strict_crc) {
-		const computed = crc.jamcrc(archive[crc_start..crc_end]);
-		if (computed != header_crc) return Error.HeaderCrcMismatch;
-	}
 
 	const comment = try allocator.alloc(u8, comment_src.len);
 	@memcpy(comment, comment_src);
@@ -190,9 +185,12 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 
 	var acc = FileAccumulator{ .allocator = allocator };
 	errdefer acc.deinit();
+	try parseDirectoryEntries(allocator, &reader, &acc, "", entry_count);
+	const crc_end = reader.index;
 
-	for (0..entry_count) |_| {
-		try parseEntry(allocator, &reader, &acc, "");
+	if (strict_crc) {
+		const computed = crc.jamcrc(archive[crc_start..crc_end]);
+		if (computed != header_crc) return Error.HeaderCrcMismatch;
 	}
 
 	return .{
@@ -201,45 +199,52 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 	};
 }
 
-fn parseEntry(
+fn parseDirectoryEntries(
 	allocator: std.mem.Allocator,
 	reader: *Reader,
 	acc: *FileAccumulator,
 	prefix: []const u8,
+	entry_count: usize,
 ) Error!void {
-	const name_len_kind = try reader.readU8();
-	const name_len: usize = name_len_kind & 0x7F;
-	const is_dir = (name_len_kind & 0x80) != 0;
-	const name_part = try reader.readSlice(name_len);
-	const full_name = try joinPath(allocator, prefix, name_part);
-	errdefer allocator.free(full_name);
+	var remaining: usize = entry_count;
+	while (remaining > 0) {
+		const name_len_kind = try reader.readU8();
+		const name_len: usize = name_len_kind & 0x7F;
+		const is_dir = (name_len_kind & 0x80) != 0;
+		const name_part = try reader.readSlice(name_len);
+		const full_name = try joinPath(allocator, prefix, name_part);
+		errdefer allocator.free(full_name);
 
-	if (is_dir) {
-		const descendants = try reader.readU16();
-		for (0..descendants) |_| {
-			try parseEntry(allocator, reader, acc, full_name);
+		if (is_dir) {
+			const descendants = try reader.readU16();
+			const subtree_count: usize = @as(usize, descendants) + 1;
+			if (subtree_count > remaining) return Error.InvalidEntryCount;
+			defer allocator.free(full_name);
+			try parseDirectoryEntries(allocator, reader, acc, full_name, @intCast(descendants));
+			remaining -= subtree_count;
+			continue;
 		}
-		return;
+
+		const entry = MetadataEntry{
+			.name = full_name,
+			.volume = try reader.readU8(),
+			.fork_data_offset = try reader.readU32(),
+			.file_type = try reader.readU32(),
+			.creator = try reader.readU32(),
+			.created = try reader.readU32(),
+			.modified = try reader.readU32(),
+			.finder_flags = try reader.readU16(),
+			.file_crc = try reader.readU32(),
+			.flags = try reader.readU16(),
+			.resource_uncompressed_len = try reader.readU32(),
+			.data_uncompressed_len = try reader.readU32(),
+			.resource_compressed_len = try reader.readU32(),
+			.data_compressed_len = try reader.readU32(),
+		};
+
+		try acc.append(entry);
+		remaining -= 1;
 	}
-
-	const entry = MetadataEntry{
-		.name = full_name,
-		.volume = try reader.readU8(),
-		.fork_data_offset = try reader.readU32(),
-		.file_type = try reader.readU32(),
-		.creator = try reader.readU32(),
-		.created = try reader.readU32(),
-		.modified = try reader.readU32(),
-		.finder_flags = try reader.readU16(),
-		.file_crc = try reader.readU32(),
-		.flags = try reader.readU16(),
-		.resource_uncompressed_len = try reader.readU32(),
-		.data_uncompressed_len = try reader.readU32(),
-		.resource_compressed_len = try reader.readU32(),
-		.data_compressed_len = try reader.readU32(),
-	};
-
-	try acc.append(entry);
 }
 
 fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, part: []const u8) ![]u8 {
@@ -490,9 +495,25 @@ fn writeFileEntry(writer: *Writer, item: PreparedEntry, leaf_name: []const u8) v
 	writer.writeU32(item.forks.data_compressed_len);
 }
 
+fn computeTreeEntryCounts(nodes: []const TreeNode, node_idx: usize, counts: []u32) Error!u32 {
+	const node = nodes[node_idx];
+	if (!node.is_dir) {
+		counts[node_idx] = 1;
+		return 1;
+	}
+	var total: u32 = 1;
+	for (node.children.items) |child_idx| {
+		const child_total = try computeTreeEntryCounts(nodes, child_idx, counts);
+		total = std.math.add(u32, total, child_total) catch return Error.TooManyEntries;
+	}
+	counts[node_idx] = total;
+	return total;
+}
+
 fn serializeTreeNode(
 	writer: *Writer,
 	nodes: []const TreeNode,
+	entry_counts: []const u32,
 	node_idx: usize,
 	prepared: []const PreparedEntry,
 ) void {
@@ -500,9 +521,10 @@ fn serializeTreeNode(
 	if (node.is_dir) {
 		writer.writeU8(@as(u8, 0x80) | @as(u8, @intCast(node.name.len)));
 		writer.writeSlice(node.name);
-		writer.writeU16(@intCast(node.children.items.len));
+		const descendants = entry_counts[node_idx] - 1;
+		writer.writeU16(@intCast(descendants));
 		for (node.children.items) |child_idx| {
-			serializeTreeNode(writer, nodes, child_idx, prepared);
+			serializeTreeNode(writer, nodes, entry_counts, child_idx, prepared);
 		}
 		return;
 	}
@@ -567,7 +589,17 @@ pub fn createArchive(
 	for (prepared.items, 0..) |item, idx| {
 		try insertEntryPath(allocator, &nodes, item.input.name, idx);
 	}
-	if (nodes.items[0].children.items.len > std.math.maxInt(u16)) return Error.TooManyEntries;
+	const entry_counts = try allocator.alloc(u32, nodes.items.len);
+	defer allocator.free(entry_counts);
+	@memset(entry_counts, 0);
+	const root_total = try computeTreeEntryCounts(nodes.items, 0, entry_counts);
+	const root_descendants = root_total - 1;
+	if (root_descendants > std.math.maxInt(u16)) return Error.TooManyEntries;
+	for (nodes.items, 0..) |node, idx| {
+		if (!node.is_dir) continue;
+		const descendants = entry_counts[idx] - 1;
+		if (descendants > std.math.maxInt(u16)) return Error.TooManyEntries;
+	}
 
 	const preamble_len: usize = 8;
 	const header_fixed_len: usize = 4 + 2 + 1 + comment.len;
@@ -599,14 +631,14 @@ pub fn createArchive(
 	const header_crc_at = writer.index;
 	writer.writeU32(0);
 	const crc_start = writer.index;
-	writer.writeU16(@intCast(nodes.items[0].children.items.len));
+	writer.writeU16(@intCast(root_descendants));
 	writer.writeU8(@intCast(comment.len));
 	writer.writeSlice(comment);
-	const crc_end = writer.index;
 
 	for (nodes.items[0].children.items) |child_idx| {
-		serializeTreeNode(&writer, nodes.items, child_idx, prepared.items);
+		serializeTreeNode(&writer, nodes.items, entry_counts, child_idx, prepared.items);
 	}
+	const crc_end = writer.index;
 
 	for (stats.file_order.items) |file_idx| {
 		const item = prepared.items[file_idx];
