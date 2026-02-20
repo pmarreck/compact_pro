@@ -55,7 +55,7 @@
 - `flake.nix`
   - Dependency control and reproducible dev shell/build/check definitions.
 
-- `.garnix.yaml`
+- `garnix.yaml`
   - Garnix build/check configuration using flake outputs for Linux `x86_64` and `aarch64`.
 
 - `.github/workflows/ci.yml`
