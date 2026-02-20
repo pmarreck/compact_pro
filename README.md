@@ -1,6 +1,6 @@
 # compact_pro
 
-[![Garnix](https://garnix.io/api/badges/pmarreck/compact_pro?branch=yolo)](https://garnix.io/repo/pmarreck/compact_pro)
+[![built with garnix](https://img.shields.io/endpoint.svg?url=https%3A%2F%2Fgarnix.io%2Fapi%2Fbadges%2Fpmarreck%2Fcompact_pro%3Fbranch%3Dyolo)](https://garnix.io)
 [![GitHub Actions](https://github.com/pmarreck/compact_pro/actions/workflows/ci.yml/badge.svg?branch=yolo)](https://github.com/pmarreck/compact_pro/actions/workflows/ci.yml)
 
 `compact_pro` is a clean-room, cross-platform Compact Pro (`.cpt`) implementation.
