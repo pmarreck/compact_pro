@@ -27,6 +27,7 @@
 - [x] Fix Compact Pro container count semantics in writer/parser (root and directory counts as full subtree entry totals) for legacy extractor compatibility. (completed 2026-02-20 16:31 EST)
 - [x] Fix Compact Pro header CRC coverage to include linearized entry metadata block (count/comment + all entry records) and lock with a regression unit test. (completed 2026-02-20 16:42 EST)
 - [x] Reproduce and fix RLE corruption around `0x81,0x81,0x81,0x82` sequences (seen in Fallout saves), with unit regression and `unar` validation against full Fallout archive. (completed 2026-02-20 16:51 EST)
+- [x] Remove `garnix.yaml` and move CI target selection into `flake.nix` checks (5-target matrix), plus Linux POSIX C macro fixes needed for flake cross-target builds. (completed 2026-02-20 17:02 EST)
 
 ## Continuity
 

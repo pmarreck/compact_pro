@@ -11,6 +11,7 @@
 
 ## CI Coverage
 
+- Garnix is flake-driven (no `garnix.yaml`): it builds flake `checks` target entries.
 - Linux x86_64 (Nix-based full test + build)
 - Linux aarch64 (Nix-based full test + build)
 - macOS aarch64 (Nix-based full test + build)
