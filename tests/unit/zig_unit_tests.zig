@@ -53,6 +53,73 @@ test "rle roundtrip handles triple 0x81 before 0x82" {
 	try std.testing.expectEqualSlices(u8, &raw, decoded);
 }
 
+test "rle encode boundaries for literal run and escape transitions" {
+	const raw = [_]u8{ 0x10, 0x11, 0x12, 0x13, 0x13, 0x13, 0x13, 0x13, 0x20, 0x81, 0x82 };
+	const encoded = try core.rle8182.encode(allocator(), &raw);
+	defer allocator().free(encoded);
+	try std.testing.expectEqualSlices(u8, &[_]u8{
+		0x10, 0x11, 0x12,
+		0x13, 0x81, 0x82, 0x05,
+		0x20,
+		0x81, 0x82, 0x00,
+	}, encoded);
+	const decoded = try core.rle8182.decode(allocator(), encoded, raw.len, true);
+	defer allocator().free(decoded);
+	try std.testing.expectEqualSlices(u8, &raw, decoded);
+}
+
+test "lzh roundtrip over rle payload" {
+	const segment = "ABCDEFGH01234567";
+	const repeat_count = 8192;
+	const raw = try allocator().alloc(u8, segment.len * repeat_count);
+	defer allocator().free(raw);
+	for (0..repeat_count) |i| {
+		const at = i * segment.len;
+		@memcpy(raw[at .. at + segment.len], segment);
+	}
+
+	const rle_payload = try core.rle8182.encode(allocator(), raw);
+	defer allocator().free(rle_payload);
+	try std.testing.expect(rle_payload.len > 0);
+
+	const lzh_payload = try core.lzh.encode(allocator(), rle_payload);
+	defer allocator().free(lzh_payload);
+	const decoded = try core.lzh.decode(allocator(), lzh_payload, raw.len);
+	defer allocator().free(decoded);
+	try std.testing.expectEqualSlices(u8, raw, decoded);
+}
+
+test "archive create sets lzh data flag when lzh wins" {
+	const segment = "LZH-PATTERN-0123456789";
+	const repeat_count = 16384;
+	const data = try allocator().alloc(u8, segment.len * repeat_count);
+	defer allocator().free(data);
+	for (0..repeat_count) |i| {
+		const at = i * segment.len;
+		@memcpy(data[at .. at + segment.len], segment);
+	}
+
+	const rle_data = try core.rle8182.encode(allocator(), data);
+	defer allocator().free(rle_data);
+	try std.testing.expect(rle_data.len > 0);
+
+	const entries = [_]core.EntryInput{
+		.{ .name = "data.bin", .data = data, .resource = &.{} },
+	};
+	const archive = try core.createArchive(allocator(), &entries, "");
+	defer allocator().free(archive);
+
+	const meta = try core.parseMetadata(allocator(), archive, true);
+	defer meta.deinit(allocator());
+	try std.testing.expectEqual(@as(usize, 1), meta.entries.len);
+	try std.testing.expect((meta.entries[0].flags & core.flag_lzh_data) != 0);
+	try std.testing.expect(meta.entries[0].data_compressed_len < @as(u32, @intCast(rle_data.len)));
+
+	var extracted = try core.extractAll(allocator(), archive, true);
+	defer extracted.deinit(allocator());
+	try std.testing.expectEqualSlices(u8, data, extracted.entries[0].data);
+}
+
 test "archive create and extract roundtrip" {
 	const entries = [_]core.EntryInput{
 		.{ .name = "hello.txt", .data = "hello compact pro", .resource = "rsrc" },
@@ -100,6 +167,26 @@ test "archive parse fixture header" {
 	const meta = try core.parseMetadata(allocator(), fixture, false);
 	defer meta.deinit(allocator());
 	try std.testing.expect(meta.entries.len > 0);
+}
+
+test "archive extract fixture with lzh resource fork" {
+	const fixture = try std.fs.cwd().readFileAlloc(allocator(), "fixtures/cpt/MacEnvy21.cpt", 1024 * 1024);
+	defer allocator().free(fixture);
+
+	var extracted = try core.extractAll(allocator(), fixture, true);
+	defer extracted.deinit(allocator());
+	try std.testing.expectEqual(@as(usize, 1), extracted.entries.len);
+	try std.testing.expectEqualSlices(u8, "MacEnvy", extracted.entries[0].name);
+	try std.testing.expectEqual(@as(usize, 0), extracted.entries[0].data.len);
+	try std.testing.expectEqual(@as(usize, 36336), extracted.entries[0].resource.len);
+	var digest: [32]u8 = undefined;
+	std.crypto.hash.sha2.Sha256.hash(extracted.entries[0].resource, &digest, .{});
+	try std.testing.expectEqualSlices(u8, &[_]u8{
+		0x71, 0x68, 0x93, 0x6e, 0x8b, 0x51, 0xb8, 0xe5,
+		0xeb, 0x5e, 0xa0, 0x29, 0xcc, 0x7a, 0xb4, 0xb4,
+		0x3d, 0x12, 0x6c, 0x0a, 0x0c, 0x6e, 0xf8, 0x11,
+		0x62, 0x3e, 0x78, 0x72, 0xea, 0xe8, 0xf7, 0xcb,
+	}, &digest);
 }
 
 test "archive writer uses compact pro entry count semantics" {

@@ -28,6 +28,9 @@
 - [x] Fix Compact Pro header CRC coverage to include linearized entry metadata block (count/comment + all entry records) and lock with a regression unit test. (completed 2026-02-20 16:42 EST)
 - [x] Reproduce and fix RLE corruption around `0x81,0x81,0x81,0x82` sequences (seen in Fallout saves), with unit regression and `unar` validation against full Fallout archive. (completed 2026-02-20 16:51 EST)
 - [x] Remove `garnix.yaml` and move CI target selection into `flake.nix` checks (5-target matrix), plus Linux POSIX C macro fixes needed for flake cross-target builds. (completed 2026-02-20 17:02 EST)
+- [x] Optimization pass: speed up RLE encoder via literal-span batching and vectorized run-length scanning; validate with full test suite and benchmark rerun (`compact-pro` compress wall ~117.35ms -> ~111.45ms on `./bm --runs 2`). (completed 2026-02-20 17:47 EST)
+- [x] Implement LZH decode in pure Zig core (LZH+RLE pipeline) and validate against real Compact Pro fixture (`MacEnvy21.cpt`) via strict CRC + SHA-256 resource hash + CLI regression. (completed 2026-02-20 18:35 EST)
+- [x] Implement LZH encode in pure Zig core and wire archive writes to choose per-fork `RLE` vs `LZH(RLE)` by size, with metadata flag persistence and external `lsar`/`unar` verification. (completed 2026-02-20 18:46 EST)
 
 ## Continuity
 

@@ -115,7 +115,8 @@ Defaults:
 ## Compatibility Notes
 
 - RLE profile implemented for read/write.
-- LZH decode/write is not implemented yet; archives requiring LZH decode fail with explicit unsupported error.
+- LZH profile implemented for read/write.
+- On write, each fork is encoded as RLE first, then optionally LZH-over-RLE when strictly smaller; corresponding Compact Pro flags are set per fork.
 - Container entry-count fields follow legacy Compact Pro subtree-count semantics for root/directory metadata traversal.
 - Metadata extension is appended as trailer bytes after canonical Compact Pro payload; legacy tools should ignore trailing bytes while this implementation restores metadata from that trailer.
 

@@ -1,5 +1,6 @@
 const std = @import("std");
 const crc = @import("crc32jam.zig");
+pub const lzh = @import("lzh.zig");
 pub const rle8182 = @import("rle8182.zig");
 
 pub const flag_encrypted: u16 = 0x0001;
@@ -87,7 +88,7 @@ pub const Error = error{
 	DuplicateEntryPath,
 	OffsetOutOfRange,
 	FileCrcMismatch,
-} || rle8182.Error || std.mem.Allocator.Error;
+} || rle8182.Error || lzh.Error || std.mem.Allocator.Error;
 
 const FileAccumulator = struct {
 	allocator: std.mem.Allocator,
@@ -279,8 +280,10 @@ fn decodeFork(
 	if (uncompressed_len == 0 and compressed_len == 0) {
 		return try allocator.alloc(u8, 0);
 	}
-	if (lzh_enabled) return Error.UnsupportedLzhEntry;
 	const compressed = try readForkSlice(archive, offset, compressed_len);
+	if (lzh_enabled) {
+		return try lzh.decode(allocator, compressed, @intCast(uncompressed_len));
+	}
 	return try rle8182.decode(allocator, compressed, @intCast(uncompressed_len), true);
 }
 
@@ -363,6 +366,7 @@ const EncodedForks = struct {
 	data_uncompressed_len: u32,
 	resource_compressed_len: u32,
 	data_compressed_len: u32,
+	flags: u16,
 	file_crc: u32,
 
 	fn deinit(self: EncodedForks, allocator: std.mem.Allocator) void {
@@ -370,6 +374,43 @@ const EncodedForks = struct {
 		allocator.free(self.data_encoded);
 	}
 };
+
+const ForkEncoding = struct {
+	bytes: []u8,
+	compressed_len: u32,
+	use_lzh: bool,
+};
+
+fn encodeForkForArchive(allocator: std.mem.Allocator, raw: []const u8) Error!ForkEncoding {
+	const rle_bytes = try rle8182.encode(allocator, raw);
+	errdefer allocator.free(rle_bytes);
+	const rle_len: u32 = @intCast(rle_bytes.len);
+	if (rle_bytes.len == 0) {
+		return .{
+			.bytes = rle_bytes,
+			.compressed_len = rle_len,
+			.use_lzh = false,
+		};
+	}
+
+	const lzh_bytes = try lzh.encode(allocator, rle_bytes);
+	errdefer allocator.free(lzh_bytes);
+	if (lzh_bytes.len < rle_bytes.len) {
+		allocator.free(rle_bytes);
+		return .{
+			.bytes = lzh_bytes,
+			.compressed_len = @intCast(lzh_bytes.len),
+			.use_lzh = true,
+		};
+	}
+
+	allocator.free(lzh_bytes);
+	return .{
+		.bytes = rle_bytes,
+		.compressed_len = rle_len,
+		.use_lzh = false,
+	};
+}
 
 const PreparedEntry = struct {
 	input: EntryInput,
@@ -488,7 +529,7 @@ fn writeFileEntry(writer: *Writer, item: PreparedEntry, leaf_name: []const u8) v
 	writer.writeU32(item.input.modified);
 	writer.writeU16(item.input.finder_flags);
 	writer.writeU32(item.forks.file_crc);
-	writer.writeU16(0);
+	writer.writeU16(item.forks.flags);
 	writer.writeU32(item.forks.resource_uncompressed_len);
 	writer.writeU32(item.forks.data_uncompressed_len);
 	writer.writeU32(item.forks.resource_compressed_len);
@@ -548,15 +589,16 @@ pub fn createArchive(
 
 	for (entries) |entry| {
 		if (entry.name.len == 0) return Error.InvalidNameLength;
-		const resource_encoded = try rle8182.encode(allocator, entry.resource);
-		errdefer allocator.free(resource_encoded);
-		const data_encoded = try rle8182.encode(allocator, entry.data);
-		errdefer allocator.free(data_encoded);
+		const resource_encoded = try encodeForkForArchive(allocator, entry.resource);
+		errdefer allocator.free(resource_encoded.bytes);
+		const data_encoded = try encodeForkForArchive(allocator, entry.data);
+		errdefer allocator.free(data_encoded.bytes);
 
 		const resource_len_u32: u32 = @intCast(entry.resource.len);
 		const data_len_u32: u32 = @intCast(entry.data.len);
-		const resource_comp_u32: u32 = @intCast(resource_encoded.len);
-		const data_comp_u32: u32 = @intCast(data_encoded.len);
+		var flags: u16 = 0;
+		if (resource_encoded.use_lzh) flags |= flag_lzh_resource;
+		if (data_encoded.use_lzh) flags |= flag_lzh_data;
 
 		var file_crc = crc.update(crc.initial, entry.resource);
 		file_crc = crc.update(file_crc, entry.data);
@@ -564,12 +606,13 @@ pub fn createArchive(
 		try prepared.append(allocator, .{
 			.input = entry,
 			.forks = .{
-				.resource_encoded = resource_encoded,
-				.data_encoded = data_encoded,
+				.resource_encoded = resource_encoded.bytes,
+				.data_encoded = data_encoded.bytes,
 				.resource_uncompressed_len = resource_len_u32,
 				.data_uncompressed_len = data_len_u32,
-				.resource_compressed_len = resource_comp_u32,
-				.data_compressed_len = data_comp_u32,
+				.resource_compressed_len = resource_encoded.compressed_len,
+				.data_compressed_len = data_encoded.compressed_len,
+				.flags = flags,
 				.file_crc = file_crc,
 			},
 			.fork_data_offset = 0,

@@ -91,47 +91,81 @@ pub fn decode(
 pub fn encode(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 	var out: std.ArrayListUnmanaged(u8) = .{};
 	errdefer out.deinit(allocator);
-	try out.ensureTotalCapacity(allocator, raw.len);
+	try out.ensureTotalCapacity(allocator, raw.len + raw.len / 2 + 8);
 
 	var i: usize = 0;
 	while (i < raw.len) {
-		const b = raw[i];
-		if (b != 0x81) {
-			var run_len: usize = 1;
-			while (i + run_len < raw.len and raw[i + run_len] == b) : (run_len += 1) {}
+		if (raw[i] != 0x81) {
+			const literal_start = i;
+			while (i < raw.len and raw[i] != 0x81) {
+				if (i + 4 < raw.len and
+					raw[i] == raw[i + 1] and
+					raw[i] == raw[i + 2] and
+					raw[i] == raw[i + 3] and
+					raw[i] == raw[i + 4]) break;
+				i += 1;
+			}
 
-			if (run_len >= 5) {
-				try out.append(allocator, b);
-				var remaining = run_len - 1;
-				while (remaining > 0) {
-					const additional: usize = @min(remaining, 254);
-					try out.appendSlice(allocator, &[_]u8{ 0x81, 0x82, @intCast(additional + 1) });
-					remaining -= additional;
-				}
-			} else {
-				for (0..run_len) |_| {
-					try out.append(allocator, b);
-				}
+			if (i > literal_start) {
+				try out.appendSlice(allocator, raw[literal_start..i]);
+				continue;
+			}
+
+			const run_byte = raw[i];
+			const run_len = countByteRun(raw, i);
+			const remaining = run_len - 1;
+			const chunk_count = if (remaining == 0) @as(usize, 0) else (remaining + 253) / 254;
+			const emit_len = 1 + chunk_count * 3;
+			var emit = try out.addManyAsSlice(allocator, emit_len);
+			emit[0] = run_byte;
+			var pos: usize = 1;
+			var rem = remaining;
+			while (rem > 0) {
+				const additional: usize = @min(rem, 254);
+				emit[pos] = 0x81;
+				emit[pos + 1] = 0x82;
+				emit[pos + 2] = @intCast(additional + 1);
+				pos += 3;
+				rem -= additional;
 			}
 			i += run_len;
 			continue;
 		}
 
-		var run_81: usize = 1;
-		while (i + run_81 < raw.len and raw[i + run_81] == 0x81) : (run_81 += 1) {}
+		const run_81 = countByteRun(raw, i);
 
 		if (i + run_81 == raw.len) {
-			for (0..run_81 + 1) |_| try out.append(allocator, 0x81);
+			const emit = try out.addManyAsSlice(allocator, run_81 + 1);
+			@memset(emit, 0x81);
 			i += run_81;
 			continue;
 		}
 
-		for (0..run_81) |_| try out.append(allocator, 0x81);
 		const next = raw[i + run_81];
-		try out.append(allocator, next);
-		if (next == 0x82) try out.append(allocator, 0x00);
+		const emit_len = run_81 + 1 + if (next == 0x82) @as(usize, 1) else @as(usize, 0);
+		const emit = try out.addManyAsSlice(allocator, emit_len);
+		@memset(emit[0..run_81], 0x81);
+		emit[run_81] = next;
+		if (next == 0x82) emit[run_81 + 1] = 0x00;
 		i += run_81 + 1;
 	}
 
 	return try out.toOwnedSlice(allocator);
+}
+
+fn countByteRun(raw: []const u8, start: usize) usize {
+	const b = raw[start];
+	var idx = start + 1;
+	const vec_len = comptime std.simd.suggestVectorLength(u8) orelse 16;
+	const Vec = @Vector(vec_len, u8);
+	const pattern: Vec = @splat(b);
+
+	while (idx + vec_len <= raw.len) {
+		const ptr: *align(1) const Vec = @ptrCast(raw.ptr + idx);
+		const chunk = ptr.*;
+		if (!@reduce(.And, chunk == pattern)) break;
+		idx += vec_len;
+	}
+	while (idx < raw.len and raw[idx] == b) : (idx += 1) {}
+	return idx - start;
 }

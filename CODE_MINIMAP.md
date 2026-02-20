@@ -3,7 +3,7 @@
 ## Repository Summary
 
 `compact_pro` now contains a full clean-room implementation baseline:
-- Pure Zig core for Compact Pro parsing/extraction/writing (RLE profile).
+- Pure Zig core for Compact Pro parsing/extraction/writing (RLE + LZH profiles).
 - C ABI for embedding.
 - C CLI (`compact-pro`) handling all filesystem/resource-fork/metadata I/O.
 - Nix-based dev/build/test environment and CI.
@@ -20,14 +20,21 @@
   - Compact Pro RLE (`0x81/0x82`) encoder/decoder.
   - Encoder now emits repeat-run opcodes for repeated non-`0x81` bytes (thresholded to avoid size regressions on short runs).
   - Encoder `0x81` path now handles arbitrary runs of `0x81` bytes correctly (including `0x81,0x81,0x81,0x82` patterns) to avoid decode drift/checksum failures in external tools.
+  - Encoder hot path now batches literal spans and uses vectorized repeated-byte run scanning plus slice-reserved run emission to reduce compress-time overhead on large inputs.
   - Decoder now writes into preallocated output and fills repeat runs in chunks to reduce extraction-time overhead.
+
+- `src/lzh.zig`
+  - Pure Compact Pro LZH codec with per-block Huffman codebook parsing/writing, LZSS window copy/match finding, and integrated Compact Pro RLE decode stage.
+  - Supports extraction of LZH-compressed forks from legacy archives and creation of LZH-over-RLE fork payloads for new archives.
 
 - `src/core.zig`
   - Pure archive engine: metadata parser, recursive entry parsing (directories/files), extraction, archive creation, and add semantics.
   - Writer supports directory-structured entry encoding from slash-delimited archive paths.
   - Parser/writer now use legacy Compact Pro subtree-count semantics for root/directory entry counts (not immediate-child counts), improving external-tool compatibility.
   - Header CRC validation/generation now covers the full metadata envelope expected by legacy tooling: entry count, comment, and all serialized entry records up to payload start.
-  - Returns explicit unsupported errors for encrypted/LZH decode paths.
+  - Returns explicit unsupported errors for encrypted paths.
+  - Read path decodes LZH forks through `src/lzh.zig`.
+  - Write path now picks per-fork compression strategy (`RLE` vs `LZH(RLE)`) by encoded size and persists Compact Pro LZH flags in entry metadata.
 
 - `src/ffi.zig`
   - C ABI layer over core.
@@ -55,10 +62,10 @@
   - `compress` supports optional `-o` (default archive naming), `~` path expansion, auto `.cpt` suffix for named outputs, stdin input via `-`, and stdout output via `-`.
 
 - `tests/unit/zig_unit_tests.zig`
-  - Unit tests for RLE behavior (including repeated-byte compression and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
+  - Unit tests for RLE behavior (including repeated-byte compression, literal/run/escape boundary encoding, and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, LZH fixture extraction/hash verification, LZH encode/decode roundtrip, write-path LZH flag selection, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
 
 - `tests/cli/test_cli.sh`
-  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, progress flags, trailer accounting output, and cross-OS metadata warning behavior.
+  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, LZH fixture extraction, progress flags, trailer accounting output, and cross-OS metadata warning behavior.
 
 - `build.zig`
   - Zig build graph for static library, CLI executable, and unit-test step.

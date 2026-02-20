@@ -172,3 +172,11 @@ mkdir -p "$tmp_dir/out-empty"
 empty_mode_src="$(stat --printf='%a' "$tmp_dir/empty-root/inner-empty")"
 empty_mode_dst="$(stat --printf='%a' "$tmp_dir/out-empty/empty-root/inner-empty")"
 [[ "$empty_mode_src" == "$empty_mode_dst" ]]
+
+mkdir -p "$tmp_dir/out-lzh"
+./zig-out/bin/compact-pro expand --sidecar fixtures/cpt/MacEnvy21.cpt -d "$tmp_dir/out-lzh"
+[[ -f "$tmp_dir/out-lzh/MacEnvy" ]]
+[[ -f "$tmp_dir/out-lzh/._MacEnvy" ]]
+[[ "$(wc -c < "$tmp_dir/out-lzh/MacEnvy" | tr -d '[:space:]')" == "0" ]]
+[[ "$(wc -c < "$tmp_dir/out-lzh/._MacEnvy" | tr -d '[:space:]')" == "36336" ]]
+[[ "$(shasum -a 256 "$tmp_dir/out-lzh/._MacEnvy" | awk '{print $1}')" == "7168936e8b51b8e5eb5ea029cc7ab4b43d126c0a0c6ef811623e7872eae8f7cb" ]]
