@@ -392,12 +392,22 @@ fn findBestMatch(data: []const u8, pos: usize, head: []i32, prev: []i32) struct 
 	var depth: usize = 0;
 	var candidate = head[h];
 	const max_end = @min(data.len, pos + max_match_len);
+	const max_len_here = max_end - pos;
 
 	while (candidate >= 0 and depth < chain_limit) : (depth += 1) {
 		const cand: usize = @intCast(candidate);
 		if (cand >= pos) break;
 		const offset = pos - cand;
 		if (offset == 0 or offset >= window_size) {
+			candidate = prev[cand & (window_size - 1)];
+			continue;
+		}
+		if (best_len == max_len_here) break;
+		if (data[cand] != data[pos]) {
+			candidate = prev[cand & (window_size - 1)];
+			continue;
+		}
+		if (best_len > 0 and best_len < max_len_here and data[cand + best_len] != data[pos + best_len]) {
 			candidate = prev[cand & (window_size - 1)];
 			continue;
 		}

@@ -26,6 +26,7 @@
 - `src/lzh.zig`
   - Pure Compact Pro LZH codec with per-block Huffman codebook parsing/writing, LZSS window copy/match finding, and integrated Compact Pro RLE decode stage.
   - Supports extraction of LZH-compressed forks from legacy archives and creation of LZH-over-RLE fork payloads for new archives.
+  - Encoder match finder now prefilters chain candidates using current best-match boundary bytes to reduce needless byte-by-byte scans on large multi-block inputs.
 
 - `src/core.zig`
   - Pure archive engine: metadata parser, recursive entry parsing (directories/files), extraction, archive creation, and add semantics.
