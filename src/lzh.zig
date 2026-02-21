@@ -335,6 +335,20 @@ const Token = union(enum) {
 	},
 };
 
+const BlockTokens = struct {
+	tokens: []Token,
+	has_more: bool,
+};
+
+const WorkerCtx = struct {
+	blocks: []const BlockTokens,
+	results: []?[]u8,
+	worker_id: usize,
+	step: usize,
+	arena: std.heap.ArenaAllocator,
+	err: ?Error = null,
+};
+
 const BitWriter = struct {
 	allocator: std.mem.Allocator,
 	out: *std.ArrayListUnmanaged(u8),
@@ -669,10 +683,23 @@ fn encodeBlockTokens(
 	}
 }
 
-pub fn encode(allocator: std.mem.Allocator, input: []const u8) Error![]u8 {
+fn encodeBlockToOwned(
+	allocator: std.mem.Allocator,
+	tokens: []const Token,
+	has_more_blocks: bool,
+) Error![]u8 {
 	var out: std.ArrayListUnmanaged(u8) = .{};
 	errdefer out.deinit(allocator);
-	try out.ensureTotalCapacity(allocator, input.len / 2 + 64);
+	try encodeBlockTokens(allocator, &out, tokens, has_more_blocks);
+	return try out.toOwnedSlice(allocator);
+}
+
+fn collectTokenBlocks(allocator: std.mem.Allocator, input: []const u8) Error![]BlockTokens {
+	var blocks: std.ArrayListUnmanaged(BlockTokens) = .{};
+	errdefer {
+		for (blocks.items) |block| allocator.free(block.tokens);
+		blocks.deinit(allocator);
+	}
 
 	const head = try allocator.alloc(i32, hash_size);
 	defer allocator.free(head);
@@ -712,10 +739,144 @@ pub fn encode(allocator: std.mem.Allocator, input: []const u8) Error![]u8 {
 		}
 
 		if (tokens.items.len == 0) break;
-		try encodeBlockTokens(allocator, &out, tokens.items, pos < input.len);
+		const owned = try allocator.alloc(Token, tokens.items.len);
+		@memcpy(owned, tokens.items);
+		try blocks.append(allocator, .{
+			.tokens = owned,
+			.has_more = false,
+		});
 	}
 
+	for (blocks.items, 0..) |*block, i| {
+		block.has_more = i + 1 < blocks.items.len;
+	}
+
+	return try blocks.toOwnedSlice(allocator);
+}
+
+fn chooseWorkerCount(worker_limit: usize, block_count: usize) usize {
+	if (block_count == 0) return 1;
+	var workers = if (worker_limit == 0)
+		(std.Thread.getCpuCount() catch 1)
+	else
+		worker_limit;
+	if (workers == 0) workers = 1;
+	return @min(workers, block_count);
+}
+
+fn workerEncodeBlocks(ctx: *WorkerCtx) void {
+	const allocator = ctx.arena.allocator();
+	var idx = ctx.worker_id;
+	while (idx < ctx.blocks.len) : (idx += ctx.step) {
+		const block = ctx.blocks[idx];
+		const encoded = encodeBlockToOwned(allocator, block.tokens, block.has_more) catch |err| {
+			ctx.err = err;
+			return;
+		};
+		ctx.results[idx] = encoded;
+	}
+}
+
+fn encodeBlocksSequential(allocator: std.mem.Allocator, blocks: []const BlockTokens) Error![]u8 {
+	var out: std.ArrayListUnmanaged(u8) = .{};
+	errdefer out.deinit(allocator);
+	try out.ensureTotalCapacity(allocator, blocks.len * 8);
+	for (blocks) |block| {
+		try encodeBlockTokens(allocator, &out, block.tokens, block.has_more);
+	}
 	return try out.toOwnedSlice(allocator);
+}
+
+fn encodeBlocksParallel(
+	allocator: std.mem.Allocator,
+	blocks: []const BlockTokens,
+	worker_count: usize,
+) Error![]u8 {
+	const results = try allocator.alloc(?[]u8, blocks.len);
+	defer allocator.free(results);
+	@memset(results, null);
+
+	var contexts = try allocator.alloc(WorkerCtx, worker_count);
+	defer {
+		for (contexts) |*ctx| ctx.arena.deinit();
+		allocator.free(contexts);
+	}
+
+	for (contexts, 0..) |*ctx, worker_id| {
+		ctx.* = .{
+			.blocks = blocks,
+			.results = results,
+			.worker_id = worker_id,
+			.step = worker_count,
+			.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+		};
+	}
+
+	var threads = try allocator.alloc(std.Thread, worker_count - 1);
+	defer allocator.free(threads);
+
+	var spawned: usize = 0;
+	var spawn_failed = false;
+	var worker_id: usize = 1;
+	while (worker_id < worker_count) : (worker_id += 1) {
+		threads[spawned] = std.Thread.spawn(.{}, workerEncodeBlocks, .{&contexts[worker_id]}) catch {
+			spawn_failed = true;
+			break;
+		};
+		spawned += 1;
+	}
+
+	workerEncodeBlocks(&contexts[0]);
+
+	for (threads[0..spawned]) |thread| thread.join();
+
+	if (spawn_failed) {
+		var fallback_worker = spawned + 1;
+		while (fallback_worker < worker_count) : (fallback_worker += 1) {
+			workerEncodeBlocks(&contexts[fallback_worker]);
+		}
+	}
+
+	for (contexts) |ctx| {
+		if (ctx.err) |err| return err;
+	}
+
+	var total_len: usize = 0;
+	for (results) |maybe_encoded| {
+		const encoded = maybe_encoded orelse unreachable;
+		total_len = std.math.add(usize, total_len, encoded.len) catch return error.OutOfMemory;
+	}
+
+	const out = try allocator.alloc(u8, total_len);
+	errdefer allocator.free(out);
+	var cursor: usize = 0;
+	for (results) |maybe_encoded| {
+		const encoded = maybe_encoded orelse unreachable;
+		@memcpy(out[cursor .. cursor + encoded.len], encoded);
+		cursor += encoded.len;
+	}
+
+	return out;
+}
+
+pub fn encodeWithWorkerLimit(allocator: std.mem.Allocator, input: []const u8, worker_limit: usize) Error![]u8 {
+	const blocks = try collectTokenBlocks(allocator, input);
+	defer {
+		for (blocks) |block| allocator.free(block.tokens);
+		allocator.free(blocks);
+	}
+
+	if (blocks.len == 0) return try allocator.alloc(u8, 0);
+
+	const worker_count = chooseWorkerCount(worker_limit, blocks.len);
+	if (worker_count <= 1 or blocks.len < 2) {
+		return try encodeBlocksSequential(allocator, blocks);
+	}
+	return try encodeBlocksParallel(allocator, blocks, worker_count);
+}
+
+pub fn encode(allocator: std.mem.Allocator, input: []const u8) Error![]u8 {
+	return try encodeWithWorkerLimit(allocator, input, 0);
 }
 
 pub fn decode(allocator: std.mem.Allocator, compressed: []const u8, expected_len: usize) Error![]u8 {

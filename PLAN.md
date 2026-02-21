@@ -33,6 +33,7 @@
 - [x] Implement LZH encode in pure Zig core and wire archive writes to choose per-fork `RLE` vs `LZH(RLE)` by size, with metadata flag persistence and external `lsar`/`unar` verification. (completed 2026-02-20 18:46 EST)
 - [x] Reproduce and fix The Unarchiver incompatibility for generated archives by adding a `unar` multi-block regression and correcting LZH multi-block writer termination semantics (allowing block-token overshoot to reach `block_count >= 0x1fff0`). (completed 2026-02-20 20:20 EST)
 - [x] Optimization pass: speed up LZH encode match search via best-length candidate prefiltering, validate with full suite + benchmark rerun. (completed 2026-02-20 21:52 EST)
+- [x] Optimization pass: implement concurrent LZH block encoding pipeline (sequential match/token phase + parallel block Huffman/bitstream emission with ordered merge), and lock deterministic output with worker-limit regression tests. (completed 2026-02-20 23:16 EST)
 
 ## Continuity
 

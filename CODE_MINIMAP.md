@@ -27,6 +27,7 @@
   - Pure Compact Pro LZH codec with per-block Huffman codebook parsing/writing, LZSS window copy/match finding, and integrated Compact Pro RLE decode stage.
   - Supports extraction of LZH-compressed forks from legacy archives and creation of LZH-over-RLE fork payloads for new archives.
   - Encoder match finder now prefilters chain candidates using current best-match boundary bytes to reduce needless byte-by-byte scans on large multi-block inputs.
+  - Encode path now supports concurrent block emission: sequential tokenization preserves dictionary semantics, while block Huffman/bitstream encoding runs in parallel with deterministic ordered merge (`encodeWithWorkerLimit`; `encode` auto-selects worker count).
 
 - `src/core.zig`
   - Pure archive engine: metadata parser, recursive entry parsing (directories/files), extraction, archive creation, and add semantics.
@@ -63,7 +64,7 @@
   - `compress` supports optional `-o` (default archive naming), `~` path expansion, auto `.cpt` suffix for named outputs, stdin input via `-`, and stdout output via `-`.
 
 - `tests/unit/zig_unit_tests.zig`
-  - Unit tests for RLE behavior (including repeated-byte compression, literal/run/escape boundary encoding, and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, LZH fixture extraction/hash verification, single- and multi-block LZH encode/decode roundtrip, write-path LZH flag selection, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
+  - Unit tests for RLE behavior (including repeated-byte compression, literal/run/escape boundary encoding, and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, LZH fixture extraction/hash verification, single- and multi-block LZH encode/decode roundtrip, deterministic multi-worker LZH encoding (`worker_limit=1` vs `4`), write-path LZH flag selection, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
 
 - `tests/cli/test_cli.sh`
   - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, LZH fixture extraction, external `unar` compatibility regression for generated archives, progress flags, trailer accounting output, and cross-OS metadata warning behavior.

@@ -113,6 +113,35 @@ test "lzh roundtrip over multi block payload" {
 	try std.testing.expectEqualSlices(u8, raw, decoded);
 }
 
+test "lzh encode output is deterministic across worker limits" {
+	const len = 350_000;
+	const raw = try allocator().alloc(u8, len);
+	defer allocator().free(raw);
+
+	var x: u32 = 0xA5C3_9E17;
+	for (raw) |*b| {
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		b.* = @truncate(x);
+	}
+
+	const rle_payload = try core.rle8182.encode(allocator(), raw);
+	defer allocator().free(rle_payload);
+	try std.testing.expect(rle_payload.len > 70_000);
+
+	const single = try core.lzh.encodeWithWorkerLimit(allocator(), rle_payload, 1);
+	defer allocator().free(single);
+	const parallel = try core.lzh.encodeWithWorkerLimit(allocator(), rle_payload, 4);
+	defer allocator().free(parallel);
+
+	try std.testing.expectEqualSlices(u8, single, parallel);
+
+	const decoded = try core.lzh.decode(allocator(), parallel, raw.len);
+	defer allocator().free(decoded);
+	try std.testing.expectEqualSlices(u8, raw, decoded);
+}
+
 test "archive create sets lzh data flag when lzh wins" {
 	const segment = "LZH-PATTERN-0123456789";
 	const repeat_count = 16384;
