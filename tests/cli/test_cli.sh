@@ -1,6 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+sha256_file() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		sha256sum "$1" | awk '{print $1}'
+		return
+	fi
+	if command -v shasum >/dev/null 2>&1; then
+		shasum -a 256 "$1" | awk '{print $1}'
+		return
+	fi
+	if command -v openssl >/dev/null 2>&1; then
+		openssl dgst -sha256 "$1" | awk '{print $NF}'
+		return
+	fi
+	echo "error: no SHA-256 tool available (need sha256sum, shasum, or openssl)" >&2
+	exit 1
+}
+
 zig build -Doptimize=ReleaseFast >/dev/null
 
 output=$(./zig-out/bin/compact-pro --help)
@@ -196,7 +213,7 @@ mkdir -p "$tmp_dir/out-lzh"
 [[ -f "$tmp_dir/out-lzh/._MacEnvy" ]]
 [[ "$(wc -c < "$tmp_dir/out-lzh/MacEnvy" | tr -d '[:space:]')" == "0" ]]
 [[ "$(wc -c < "$tmp_dir/out-lzh/._MacEnvy" | tr -d '[:space:]')" == "36336" ]]
-[[ "$(shasum -a 256 "$tmp_dir/out-lzh/._MacEnvy" | awk '{print $1}')" == "7168936e8b51b8e5eb5ea029cc7ab4b43d126c0a0c6ef811623e7872eae8f7cb" ]]
+[[ "$(sha256_file "$tmp_dir/out-lzh/._MacEnvy")" == "7168936e8b51b8e5eb5ea029cc7ab4b43d126c0a0c6ef811623e7872eae8f7cb" ]]
 
 if command -v unar >/dev/null 2>&1; then
 	awk 'BEGIN{srand(12345); n=6*1024*1024; for(i=0;i<n;i++){c=65+int(rand()*8); printf "%c", c}}' >"$tmp_dir/unar-multiblock.txt"
