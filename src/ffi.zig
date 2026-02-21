@@ -58,6 +58,8 @@ pub const CpArchiveListing = extern struct {
 	entry_count: usize,
 };
 
+pub const CpProgressFn = ?*const fn (?*anyopaque, usize, usize) callconv(.c) void;
+
 const ConversionError = error{ InvalidArgument } || std.mem.Allocator.Error;
 
 const cp_ok = 0;
@@ -153,12 +155,14 @@ fn convertInputs(c_entries: ?[*]const CpEntryInput, count: usize) ConversionErro
 	return out;
 }
 
-pub export fn cp_archive_create(
+pub export fn cp_archive_create_with_progress(
 	c_entries: ?[*]const CpEntryInput,
 	entry_count: usize,
 	comment_ptr: ?[*]const u8,
 	comment_len: usize,
 	out_archive: ?*CpBuffer,
+	progress_cb: CpProgressFn,
+	progress_ctx: ?*anyopaque,
 ) c_int {
 	if (out_archive == null) return cp_err_invalid_argument;
 	clearBuffer(out_archive.?);
@@ -167,10 +171,28 @@ pub export fn cp_archive_create(
 	const entries = convertInputs(c_entries, entry_count) catch |err| return mapError(err);
 	defer allocator.free(entries);
 
-	const bytes = core.createArchive(allocator, entries, comment) catch |err| return mapError(err);
+	const bytes = core.createArchiveWithProgress(allocator, entries, comment, progress_cb, progress_ctx) catch |err| return mapError(err);
 	out_archive.?.ptr = if (bytes.len == 0) null else bytes.ptr;
 	out_archive.?.len = bytes.len;
 	return cp_ok;
+}
+
+pub export fn cp_archive_create(
+	c_entries: ?[*]const CpEntryInput,
+	entry_count: usize,
+	comment_ptr: ?[*]const u8,
+	comment_len: usize,
+	out_archive: ?*CpBuffer,
+) c_int {
+	return cp_archive_create_with_progress(
+		c_entries,
+		entry_count,
+		comment_ptr,
+		comment_len,
+		out_archive,
+		null,
+		null,
+	);
 }
 
 pub export fn cp_archive_add(

@@ -6,6 +6,7 @@ pub const rle8182 = @import("rle8182.zig");
 pub const flag_encrypted: u16 = 0x0001;
 pub const flag_lzh_resource: u16 = 0x0002;
 pub const flag_lzh_data: u16 = 0x0004;
+pub const CreateArchiveProgressFn = *const fn (?*anyopaque, usize, usize) callconv(.c) void;
 
 pub const EntryInput = struct {
 	name: []const u8,
@@ -381,10 +382,87 @@ const ForkEncoding = struct {
 	use_lzh: bool,
 };
 
-fn encodeForkForArchive(allocator: std.mem.Allocator, raw: []const u8) Error!ForkEncoding {
-	const rle_bytes = try rle8182.encode(allocator, raw);
+const CreateProgress = struct {
+	callback: ?CreateArchiveProgressFn,
+	ctx: ?*anyopaque,
+	total_work: usize,
+	done_work: usize = 0,
+	mutex: std.Thread.Mutex = .{},
+
+	fn init(callback: ?CreateArchiveProgressFn, ctx: ?*anyopaque, total_work_raw: usize) CreateProgress {
+		return .{
+			.callback = callback,
+			.ctx = ctx,
+			.total_work = if (total_work_raw == 0) 1 else total_work_raw,
+		};
+	}
+
+	fn setDone(self: *CreateProgress, done: usize) void {
+		self.mutex.lock();
+		defer self.mutex.unlock();
+		if (done >= self.total_work) {
+			self.done_work = self.total_work;
+		} else {
+			self.done_work = done;
+		}
+		if (self.callback) |cb| cb(self.ctx, self.done_work, self.total_work);
+	}
+};
+
+fn forkWorkUnits(raw_len: usize) usize {
+	return std.math.mul(usize, raw_len, 2) catch std.math.maxInt(usize);
+}
+
+const ForkProgressCtx = struct {
+	progress: *CreateProgress,
+	base_work: usize,
+	raw_len: usize,
+};
+
+fn onRleEncodeProgress(ctx_ptr: ?*anyopaque, done: usize, total: usize) void {
+	if (ctx_ptr == null) return;
+	const ctx: *ForkProgressCtx = @ptrCast(@alignCast(ctx_ptr.?));
+	if (ctx.raw_len == 0) return;
+	const scaled = if (total == 0) done else (std.math.mul(usize, done, ctx.raw_len) catch std.math.maxInt(usize)) / total;
+	const step = if (scaled > ctx.raw_len) ctx.raw_len else scaled;
+	const mapped = std.math.add(usize, ctx.base_work, step) catch std.math.maxInt(usize);
+	ctx.progress.setDone(mapped);
+}
+
+fn onLzhEncodeProgress(ctx_ptr: ?*anyopaque, done: usize, total: usize) void {
+	if (ctx_ptr == null) return;
+	const ctx: *ForkProgressCtx = @ptrCast(@alignCast(ctx_ptr.?));
+	if (ctx.raw_len == 0) return;
+	const lzh_scaled = if (total == 0) done else (std.math.mul(usize, done, ctx.raw_len) catch std.math.maxInt(usize)) / total;
+	const step = if (lzh_scaled > ctx.raw_len) ctx.raw_len else lzh_scaled;
+	const with_rle = std.math.add(usize, ctx.base_work, ctx.raw_len) catch std.math.maxInt(usize);
+	const mapped = std.math.add(usize, with_rle, step) catch std.math.maxInt(usize);
+	ctx.progress.setDone(mapped);
+}
+
+fn encodeForkForArchive(
+	allocator: std.mem.Allocator,
+	raw: []const u8,
+	progress: ?*CreateProgress,
+	base_work: usize,
+) Error!ForkEncoding {
+	const use_progress = progress != null and raw.len > 0;
+	var fork_progress = ForkProgressCtx{
+		.progress = if (progress) |p| p else undefined,
+		.base_work = base_work,
+		.raw_len = raw.len,
+	};
+	const progress_ctx: ?*anyopaque = if (use_progress) @ptrCast(&fork_progress) else null;
+
+	const rle_bytes = try rle8182.encodeWithProgress(
+		allocator,
+		raw,
+		if (use_progress) onRleEncodeProgress else null,
+		progress_ctx,
+	);
 	errdefer allocator.free(rle_bytes);
 	const rle_len: u32 = @intCast(rle_bytes.len);
+	if (progress) |p| p.setDone(std.math.add(usize, base_work, raw.len) catch std.math.maxInt(usize));
 	if (rle_bytes.len == 0) {
 		return .{
 			.bytes = rle_bytes,
@@ -393,8 +471,15 @@ fn encodeForkForArchive(allocator: std.mem.Allocator, raw: []const u8) Error!For
 		};
 	}
 
-	const lzh_bytes = try lzh.encode(allocator, rle_bytes);
+	const lzh_bytes = try lzh.encodeWithWorkerLimitAndProgress(
+		allocator,
+		rle_bytes,
+		0,
+		if (use_progress) onLzhEncodeProgress else null,
+		progress_ctx,
+	);
 	errdefer allocator.free(lzh_bytes);
+	if (progress) |p| p.setDone(std.math.add(usize, base_work, forkWorkUnits(raw.len)) catch std.math.maxInt(usize));
 	if (lzh_bytes.len < rle_bytes.len) {
 		allocator.free(rle_bytes);
 		return .{
@@ -578,8 +663,27 @@ pub fn createArchive(
 	entries: []const EntryInput,
 	comment: []const u8,
 ) Error![]u8 {
+	return try createArchiveWithProgress(allocator, entries, comment, null, null);
+}
+
+pub fn createArchiveWithProgress(
+	allocator: std.mem.Allocator,
+	entries: []const EntryInput,
+	comment: []const u8,
+	progress_cb: ?CreateArchiveProgressFn,
+	progress_ctx: ?*anyopaque,
+) Error![]u8 {
 	if (entries.len > std.math.maxInt(u16)) return Error.TooManyEntries;
 	if (comment.len > std.math.maxInt(u8)) return Error.CommentTooLong;
+
+	var total_raw: usize = 0;
+	for (entries) |entry| {
+		const entry_raw = std.math.add(usize, entry.resource.len, entry.data.len) catch std.math.maxInt(usize);
+		total_raw = std.math.add(usize, total_raw, entry_raw) catch std.math.maxInt(usize);
+	}
+	var progress = CreateProgress.init(progress_cb, progress_ctx, forkWorkUnits(total_raw));
+	progress.setDone(0);
+	var encoded_work_done: usize = 0;
 
 	var prepared: std.ArrayListUnmanaged(PreparedEntry) = .{};
 	errdefer {
@@ -589,10 +693,12 @@ pub fn createArchive(
 
 	for (entries) |entry| {
 		if (entry.name.len == 0) return Error.InvalidNameLength;
-		const resource_encoded = try encodeForkForArchive(allocator, entry.resource);
+		const resource_encoded = try encodeForkForArchive(allocator, entry.resource, &progress, encoded_work_done);
 		errdefer allocator.free(resource_encoded.bytes);
-		const data_encoded = try encodeForkForArchive(allocator, entry.data);
+		encoded_work_done = std.math.add(usize, encoded_work_done, forkWorkUnits(entry.resource.len)) catch std.math.maxInt(usize);
+		const data_encoded = try encodeForkForArchive(allocator, entry.data, &progress, encoded_work_done);
 		errdefer allocator.free(data_encoded.bytes);
+		encoded_work_done = std.math.add(usize, encoded_work_done, forkWorkUnits(entry.data.len)) catch std.math.maxInt(usize);
 
 		const resource_len_u32: u32 = @intCast(entry.resource.len);
 		const data_len_u32: u32 = @intCast(entry.data.len);
@@ -691,6 +797,7 @@ pub fn createArchive(
 
 	const header_crc = crc.jamcrc(out[crc_start..crc_end]);
 	std.mem.writeInt(u32, out[header_crc_at..][0..4], header_crc, .big);
+	progress.setDone(progress.total_work);
 
 	for (prepared.items) |item| item.forks.deinit(allocator);
 	prepared.deinit(allocator);

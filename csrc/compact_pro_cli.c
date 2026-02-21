@@ -151,6 +151,7 @@ typedef struct {
 	size_t total;
 	size_t done;
 	double started_at;
+	double last_emit_at;
 } progress_state;
 
 typedef struct {
@@ -315,27 +316,60 @@ static void progress_begin(progress_state *p, const char *label, size_t total) {
 	p->total = total == 0 ? 1 : total;
 	p->done = 0;
 	p->started_at = now_seconds();
+	p->last_emit_at = 0.0;
 	if (!p->live) {
 		fprintf(stderr, "progress: %s 0/%zu\n", p->label, p->total);
 	}
+}
+
+static void render_progress_bar(char *out, size_t out_len, size_t done, size_t total) {
+	const size_t width = 20;
+	if (out_len < width + 1) return;
+	if (total == 0) total = 1;
+	if (done > total) done = total;
+	size_t filled = (done * width) / total;
+	if (filled > width) filled = width;
+	for (size_t i = 0; i < width; ++i) out[i] = '-';
+	if (filled >= width) {
+		for (size_t i = 0; i < width; ++i) out[i] = '=';
+	} else if (filled > 0) {
+		for (size_t i = 0; i + 1 < filled; ++i) out[i] = '=';
+		out[filled - 1] = '>';
+	}
+	out[width] = '\0';
 }
 
 static void progress_update(progress_state *p, size_t done) {
 	if (p == NULL || !p->enabled) return;
 	if (done > p->total) done = p->total;
 	p->done = done;
-	double elapsed = now_seconds() - p->started_at;
+	double now = now_seconds();
+	double elapsed = now - p->started_at;
 	if (elapsed < 0.0) elapsed = 0.0;
-	double eta = 0.0;
-	if (p->done > 0 && p->done < p->total) {
-		double per = elapsed / (double)p->done;
-		eta = per * (double)(p->total - p->done);
+	double eta = -1.0;
+	if (p->done > 0 && p->done < p->total && elapsed > 0.0) {
+		double rate = (double)p->done / elapsed;
+		if (rate > 0.0) eta = (double)(p->total - p->done) / rate;
 	}
+	double percent = (p->total == 0) ? 100.0 : ((double)p->done * 100.0) / (double)p->total;
+	char bar[21];
+	render_progress_bar(bar, sizeof(bar), p->done, p->total);
+
+	if (p->live && p->done < p->total && (now - p->last_emit_at) < 0.1) return;
+	p->last_emit_at = now;
 	if (p->live) {
-		fprintf(stderr, "\rprogress: %s %zu/%zu elapsed=%.0fs eta=%.0fs", p->label, p->done, p->total, elapsed, eta);
+		if (eta >= 0.0) {
+			fprintf(stderr, "\rprogress: %s [%s] %3.0f%% (%zu/%zu) (ETA: %.0fs) elapsed=%.0fs", p->label, bar, percent, p->done, p->total, eta, elapsed);
+		} else {
+			fprintf(stderr, "\rprogress: %s [%s] %3.0f%% (%zu/%zu) (ETA: --) elapsed=%.0fs", p->label, bar, percent, p->done, p->total, elapsed);
+		}
 		fflush(stderr);
 	} else {
-		fprintf(stderr, "progress: %s %zu/%zu elapsed=%.0fs eta=%.0fs\n", p->label, p->done, p->total, elapsed, eta);
+		if (eta >= 0.0) {
+			fprintf(stderr, "progress: %s [%s] %3.0f%% (%zu/%zu) (ETA: %.0fs) elapsed=%.0fs\n", p->label, bar, percent, p->done, p->total, eta, elapsed);
+		} else {
+			fprintf(stderr, "progress: %s [%s] %3.0f%% (%zu/%zu) (ETA: --) elapsed=%.0fs\n", p->label, bar, percent, p->done, p->total, elapsed);
+		}
 	}
 }
 
@@ -343,6 +377,14 @@ static void progress_end(progress_state *p) {
 	if (p == NULL || !p->enabled) return;
 	progress_update(p, p->total);
 	if (p->live) fprintf(stderr, "\n");
+}
+
+static void archive_encode_progress_callback(void *ctx, size_t done, size_t total) {
+	progress_state *p = (progress_state *)ctx;
+	if (p == NULL) return;
+	if (total == 0) total = 1;
+	p->total = total;
+	progress_update(p, done);
 }
 
 static const char *basename_ptr(const char *path) {
@@ -2266,9 +2308,19 @@ static int build_entries_from_inputs(
 	}
 
 	if (progress != NULL && progress->enabled) {
-		progress->total = discovered_count == 0 ? 1 : discovered_count;
+		size_t estimated_total = 0;
+		for (size_t i = 0; i < discovered_count; ++i) {
+			if (strcmp(discovered[i].source_path, "-") == 0) continue;
+			struct stat st_est;
+			if (stat(discovered[i].source_path, &st_est) == 0 && S_ISREG(st_est.st_mode) && st_est.st_size > 0) {
+				estimated_total += (size_t)st_est.st_size;
+			}
+		}
+		progress->total = estimated_total == 0 ? (discovered_count == 0 ? 1 : discovered_count) : estimated_total;
 	}
 
+	size_t bytes_done = 0;
+	bool byte_mode = (progress != NULL && progress->enabled && progress->total > discovered_count);
 	for (size_t i = 0; i < discovered_count; ++i) {
 		if (read_file_required(discovered[i].source_path, &owned[i].data, &owned[i].data_len) != 0) {
 			free_discovered_inputs(discovered, discovered_count);
@@ -2309,7 +2361,12 @@ static int build_entries_from_inputs(
 			owned[i].mode_bits = 0644u;
 			owned[i].mtime_unix = 0;
 		}
-		progress_update(progress, i + 1);
+		if (byte_mode) {
+			bytes_done += owned[i].data_len + owned[i].resource_len;
+			progress_update(progress, bytes_done);
+		} else {
+			progress_update(progress, i + 1);
+		}
 	}
 
 	free_discovered_inputs(discovered, discovered_count);
@@ -2430,21 +2487,11 @@ static int cmd_compress(int argc, char **argv) {
 	cp_entry_input *entries = NULL;
 	input_owned *owned = NULL;
 	size_t built_count = 0;
-	progress_state progress = {
-		.enabled = progress_enabled,
-		.live = progress_live,
-		.label = "compress",
-		.total = 1,
-		.done = 0,
-		.started_at = 0,
-	};
-	progress_begin(&progress, "compress-read", input_count);
-	if (build_entries_from_inputs(&s, inputs, input_count, &entries, &owned, &built_count, &progress) != 0) {
+	if (build_entries_from_inputs(&s, inputs, input_count, &entries, &owned, &built_count, NULL) != 0) {
 		free(output_path);
 		free(inputs);
 		return 1;
 	}
-	progress_end(&progress);
 	if (s.mode == RSRC_EXPLICIT && built_count != 1) {
 		free_built_entries(entries, owned, built_count);
 		free(output_path);
@@ -2487,16 +2534,19 @@ static int cmd_compress(int argc, char **argv) {
 	free_meta_records(meta_records, meta_count);
 
 	cp_buffer archive = {0};
-	phase_heartbeat encode_hb = {
+	progress_state encode_progress = {
 		.enabled = progress_enabled,
 		.live = progress_live,
-		.running = false,
-		.label = NULL,
+		.label = "compress-encode",
+		.total = 1,
+		.done = 0,
 		.started_at = 0,
+		.last_emit_at = 0,
 	};
-	phase_heartbeat_begin(&encode_hb, "compress-encode");
-	int rc = cp_archive_create(entries, built_count, NULL, 0, &archive);
-	phase_heartbeat_end(&encode_hb);
+	size_t encode_total_work = input_bytes_total > (SIZE_MAX / 2) ? SIZE_MAX : (input_bytes_total * 2);
+	progress_begin(&encode_progress, "compress-encode", encode_total_work == 0 ? 1 : encode_total_work);
+	int rc = cp_archive_create_with_progress(entries, built_count, NULL, 0, &archive, archive_encode_progress_callback, &encode_progress);
+	progress_end(&encode_progress);
 	if (rc != CP_OK) {
 		fprintf(stderr, "error: cp_archive_create failed: %s\n", cp_error_string(rc));
 		free(meta_blob);
@@ -3071,16 +3121,30 @@ static int cmd_add(int argc, char **argv) {
 	free_meta_records(meta_records, meta_count);
 
 	cp_buffer out_archive = {0};
-	phase_heartbeat encode_hb = {
+	progress_state encode_progress = {
 		.enabled = progress_enabled,
 		.live = progress_live,
-		.running = false,
-		.label = NULL,
+		.label = "add-encode",
+		.total = 1,
+		.done = 0,
 		.started_at = 0,
+		.last_emit_at = 0,
 	};
-	phase_heartbeat_begin(&encode_hb, "add-encode");
-	rc = cp_archive_create(combined, combined_count, existing.comment_ptr, existing.comment_len, &out_archive);
-	phase_heartbeat_end(&encode_hb);
+	size_t add_input_bytes_total = 0;
+	for (size_t i = 0; i < combined_count; ++i) {
+		add_input_bytes_total += combined[i].data_len + combined[i].resource_len;
+	}
+	size_t add_encode_total_work = add_input_bytes_total > (SIZE_MAX / 2) ? SIZE_MAX : (add_input_bytes_total * 2);
+	progress_begin(&encode_progress, "add-encode", add_encode_total_work == 0 ? 1 : add_encode_total_work);
+	rc = cp_archive_create_with_progress(
+		combined,
+		combined_count,
+		existing.comment_ptr,
+		existing.comment_len,
+		&out_archive,
+		archive_encode_progress_callback,
+		&encode_progress);
+	progress_end(&encode_progress);
 	free(combined);
 	free_meta_records(old_meta, old_meta_count);
 	if (rc != CP_OK) {

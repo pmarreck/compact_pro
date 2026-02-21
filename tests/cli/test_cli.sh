@@ -19,6 +19,10 @@ chmod 700 "$tmp_dir/input.txt"
 progress_compress="$(./zig-out/bin/compact-pro compress --progress -o "$tmp_dir/a-progress.cpt" "$tmp_dir/input.txt" 2>&1 >/dev/null)"
 [[ "$progress_compress" == *"progress"* ]]
 [[ "$progress_compress" == *"compress-encode"* ]]
+[[ "$progress_compress" == *"ETA:"* ]]
+printf '%s' "$progress_compress" | grep -F "[" >/dev/null
+printf '%s' "$progress_compress" | grep -F "]" >/dev/null
+[[ "$progress_compress" == *"%"* ]]
 no_progress_compress="$(./zig-out/bin/compact-pro compress --progress --no-progress -o "$tmp_dir/a-noprogress.cpt" "$tmp_dir/input.txt" 2>&1 >/dev/null)"
 [[ "$no_progress_compress" != *"progress"* ]]
 stats_compress="$(./zig-out/bin/compact-pro compress --no-progress -o "$tmp_dir/a-stats.cpt" "$tmp_dir/input.txt" 2>&1 >/dev/null)"
@@ -30,6 +34,7 @@ mkdir -p "$tmp_dir/out-a"
 progress_expand="$(./zig-out/bin/compact-pro expand --progress "$tmp_dir/a.cpt" -d "$tmp_dir/out-a-progress" 2>&1 >/dev/null)"
 [[ "$progress_expand" == *"progress"* ]]
 [[ "$progress_expand" == *"expand-decode"* ]]
+[[ "$progress_expand" == *"ETA:"* ]]
 stats_expand="$(./zig-out/bin/compact-pro expand --no-progress "$tmp_dir/a.cpt" -d "$tmp_dir/out-a-stats" 2>&1 >/dev/null)"
 [[ "$stats_expand" == *"stats: expand"* ]]
 [[ "$stats_expand" == *"MB/s"* ]]
@@ -117,6 +122,7 @@ printf 'third file\n' >"$tmp_dir/third.txt"
 progress_add="$(./zig-out/bin/compact-pro add --progress "$tmp_dir/a.cpt" "$tmp_dir/third.txt" 2>&1 >/dev/null)"
 [[ "$progress_add" == *"progress"* ]]
 [[ "$progress_add" == *"add-encode"* ]]
+[[ "$progress_add" == *"ETA:"* ]]
 mkdir -p "$tmp_dir/out-b"
 ./zig-out/bin/compact-pro expand "$tmp_dir/a.cpt" -d "$tmp_dir/out-b"
 cmp "$tmp_dir/second.txt" "$tmp_dir/out-b/second.txt"

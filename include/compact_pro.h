@@ -84,6 +84,18 @@ typedef struct {
 	size_t entry_count;
 } cp_archive_listing;
 
+typedef void (*cp_progress_fn)(void *ctx, size_t done, size_t total);
+
+int cp_archive_create_with_progress(
+	const cp_entry_input *entries,
+	size_t entry_count,
+	const uint8_t *comment,
+	size_t comment_len,
+	cp_buffer *out_archive,
+	cp_progress_fn progress_cb,
+	void *progress_ctx
+);
+
 int cp_archive_create(
 	const cp_entry_input *entries,
 	size_t entry_count,

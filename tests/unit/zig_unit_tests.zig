@@ -134,10 +134,98 @@ test "lzh encode output is deterministic across worker limits" {
 	defer allocator().free(single);
 	const parallel = try core.lzh.encodeWithWorkerLimit(allocator(), rle_payload, 4);
 	defer allocator().free(parallel);
+	try std.testing.expectEqualSlices(u8, single, parallel);
+
+	const decoded = try core.lzh.decode(allocator(), parallel, raw.len);
+	defer allocator().free(decoded);
+	try std.testing.expectEqualSlices(u8, raw, decoded);
+}
+
+test "lzh encode output is deterministic across worker limits for multi-segment payload" {
+	const len = 20_500_000;
+	const raw = try allocator().alloc(u8, len);
+	defer allocator().free(raw);
+
+	var x: u32 = 0x9E37_79B9;
+	for (raw) |*b| {
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		b.* = @truncate(x);
+	}
+
+	const rle_payload = try core.rle8182.encode(allocator(), raw);
+	defer allocator().free(rle_payload);
+	try std.testing.expect(rle_payload.len > 16_500_000);
+
+	const single = try core.lzh.encodeWithWorkerLimit(allocator(), rle_payload, 1);
+	defer allocator().free(single);
+	const parallel = try core.lzh.encodeWithWorkerLimit(allocator(), rle_payload, 4);
+	defer allocator().free(parallel);
 
 	try std.testing.expectEqualSlices(u8, single, parallel);
 
 	const decoded = try core.lzh.decode(allocator(), parallel, raw.len);
+	defer allocator().free(decoded);
+	try std.testing.expectEqualSlices(u8, raw, decoded);
+}
+
+const LzhProgressProbe = struct {
+	call_count: usize = 0,
+	last_done: usize = 0,
+	total: usize = 0,
+	stage_two_threshold: usize = 0,
+	saw_stage_two: bool = false,
+	monotonic: bool = true,
+};
+
+fn lzhProgressProbe(ctx: ?*anyopaque, done: usize, total: usize) void {
+	if (ctx == null) return;
+	const probe: *LzhProgressProbe = @ptrCast(@alignCast(ctx.?));
+	probe.call_count += 1;
+	if (done < probe.last_done) probe.monotonic = false;
+	probe.last_done = done;
+	probe.total = total;
+	if (done > probe.stage_two_threshold) probe.saw_stage_two = true;
+}
+
+test "lzh progress callback advances through token and encode phases" {
+	const len = 500_000;
+	const raw = try allocator().alloc(u8, len);
+	defer allocator().free(raw);
+
+	var x: u32 = 0xC01D_F00D;
+	for (raw) |*b| {
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		b.* = @truncate(x);
+	}
+
+	const rle_payload = try core.rle8182.encode(allocator(), raw);
+	defer allocator().free(rle_payload);
+
+	var probe = LzhProgressProbe{
+		.stage_two_threshold = rle_payload.len,
+	};
+
+	const encoded = try core.lzh.encodeWithWorkerLimitAndProgress(
+		allocator(),
+		rle_payload,
+		4,
+		lzhProgressProbe,
+		&probe,
+	);
+	defer allocator().free(encoded);
+
+	const expected_total = rle_payload.len * 2;
+	try std.testing.expect(probe.call_count > 2);
+	try std.testing.expect(probe.monotonic);
+	try std.testing.expectEqual(@as(usize, expected_total), probe.total);
+	try std.testing.expectEqual(@as(usize, expected_total), probe.last_done);
+	try std.testing.expect(probe.saw_stage_two);
+
+	const decoded = try core.lzh.decode(allocator(), encoded, raw.len);
 	defer allocator().free(decoded);
 	try std.testing.expectEqualSlices(u8, raw, decoded);
 }

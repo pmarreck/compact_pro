@@ -8,6 +8,8 @@ pub const Error = error{
 	InvalidMatchOffset,
 } || std.mem.Allocator.Error;
 
+pub const EncodeProgressFn = *const fn (?*anyopaque, usize, usize) void;
+
 const window_size: usize = 8192;
 const block_size: usize = 0x1FFF0;
 const esc1: u8 = 0x81;
@@ -19,6 +21,8 @@ const hash_mask: usize = hash_size - 1;
 const chain_limit: usize = 64;
 const min_match_len: usize = 3;
 const max_match_len: usize = 63;
+const progress_report_step: usize = 256 * 1024;
+const token_segment_size: usize = 16 * 1024 * 1024;
 
 const BitReader = struct {
 	bytes: []const u8,
@@ -337,7 +341,82 @@ const Token = union(enum) {
 
 const BlockTokens = struct {
 	tokens: []Token,
+	input_len: usize,
 	has_more: bool,
+};
+
+const SegmentTokens = struct {
+	tokens: []Token,
+	input_len: usize,
+};
+
+const EncodeProgressReporter = struct {
+	callback: ?EncodeProgressFn,
+	ctx: ?*anyopaque,
+	total_work: usize,
+	base_work: usize,
+	done_input: usize = 0,
+	mutex: std.Thread.Mutex = .{},
+
+	fn blockDone(self: *EncodeProgressReporter, block_input_len: usize) void {
+		if (self.callback == null) return;
+		self.mutex.lock();
+		defer self.mutex.unlock();
+
+		const next_done = std.math.add(usize, self.done_input, block_input_len) catch std.math.maxInt(usize);
+		const max_done = if (self.total_work > self.base_work) self.total_work - self.base_work else 0;
+		self.done_input = @min(next_done, max_done);
+		const done = @min(self.base_work + self.done_input, self.total_work);
+		self.callback.?(self.ctx, done, self.total_work);
+	}
+
+	fn complete(self: *EncodeProgressReporter) void {
+		if (self.callback) |cb| cb(self.ctx, self.total_work, self.total_work);
+	}
+};
+
+const TokenizeProgressReporter = struct {
+	callback: ?EncodeProgressFn,
+	ctx: ?*anyopaque,
+	total_work: usize,
+	phase_limit: usize,
+	done_input: usize = 0,
+	mutex: std.Thread.Mutex = .{},
+
+	fn add(self: *TokenizeProgressReporter, delta: usize) void {
+		if (self.callback == null or delta == 0) return;
+		self.mutex.lock();
+		defer self.mutex.unlock();
+
+		const next_done = std.math.add(usize, self.done_input, delta) catch std.math.maxInt(usize);
+		self.done_input = @min(next_done, self.phase_limit);
+		self.callback.?(self.ctx, self.done_input, self.total_work);
+	}
+
+	fn complete(self: *TokenizeProgressReporter) void {
+		if (self.callback == null) return;
+		self.mutex.lock();
+		self.done_input = self.phase_limit;
+		self.mutex.unlock();
+		self.callback.?(self.ctx, self.phase_limit, self.total_work);
+	}
+};
+
+const TokenizeSegment = struct {
+	start: usize,
+	end: usize,
+	prefix_start: usize,
+};
+
+const TokenizeWorkerCtx = struct {
+	input: []const u8,
+	segments: []const TokenizeSegment,
+	results: []?SegmentTokens,
+	worker_id: usize,
+	step: usize,
+	progress: ?*TokenizeProgressReporter = null,
+	arena: std.heap.ArenaAllocator,
+	err: ?Error = null,
 };
 
 const WorkerCtx = struct {
@@ -345,6 +424,7 @@ const WorkerCtx = struct {
 	results: []?[]u8,
 	worker_id: usize,
 	step: usize,
+	progress: ?*EncodeProgressReporter = null,
 	arena: std.heap.ArenaAllocator,
 	err: ?Error = null,
 };
@@ -694,7 +774,71 @@ fn encodeBlockToOwned(
 	return try out.toOwnedSlice(allocator);
 }
 
-fn collectTokenBlocks(allocator: std.mem.Allocator, input: []const u8) Error![]BlockTokens {
+fn collectTokenBlocksForRange(
+	allocator: std.mem.Allocator,
+	input: []const u8,
+	start: usize,
+	end: usize,
+	prefix_start: usize,
+	progress: ?*TokenizeProgressReporter,
+) Error!SegmentTokens {
+	const head = try allocator.alloc(i32, hash_size);
+	defer allocator.free(head);
+	@memset(head, -1);
+
+	const prev = try allocator.alloc(i32, window_size);
+	defer allocator.free(prev);
+	@memset(prev, -1);
+
+	var tokens: std.ArrayListUnmanaged(Token) = .{};
+
+	var seed = prefix_start;
+	while (seed < start) : (seed += 1) {
+		insertMatcherPos(input, seed, head, prev);
+	}
+
+	var last_report = start;
+	var pos = start;
+	while (pos < end) {
+		const best_match = findBestMatch(input, pos, head, prev);
+		const remaining = end - pos;
+		const match_len = @min(best_match.len, remaining);
+		if (match_len >= min_match_len) {
+			try tokens.append(allocator, .{
+				.match = .{
+					.len = @intCast(match_len),
+					.offset = @intCast(best_match.offset),
+				},
+			});
+			for (0..match_len) |k| insertMatcherPos(input, pos + k, head, prev);
+			pos += match_len;
+		} else {
+			try tokens.append(allocator, .{ .literal = input[pos] });
+			insertMatcherPos(input, pos, head, prev);
+			pos += 1;
+		}
+
+		if (progress != null and (pos == end or pos - last_report >= progress_report_step)) {
+			progress.?.add(pos - last_report);
+			last_report = pos;
+		}
+	}
+
+	if (progress != null and last_report < end) {
+		progress.?.add(end - last_report);
+	}
+
+	return .{
+		.tokens = try tokens.toOwnedSlice(allocator),
+		.input_len = end - start,
+	};
+}
+
+fn collectTokenBlocksSequentialDirect(
+	allocator: std.mem.Allocator,
+	input: []const u8,
+	progress: ?*TokenizeProgressReporter,
+) Error![]BlockTokens {
 	var blocks: std.ArrayListUnmanaged(BlockTokens) = .{};
 	errdefer {
 		for (blocks.items) |block| allocator.free(block.tokens);
@@ -712,30 +856,36 @@ fn collectTokenBlocks(allocator: std.mem.Allocator, input: []const u8) Error![]B
 	var tokens: std.ArrayListUnmanaged(Token) = .{};
 	defer tokens.deinit(allocator);
 
+	var last_report: usize = 0;
 	var pos: usize = 0;
 	while (pos < input.len) {
+		const block_start = pos;
 		tokens.clearRetainingCapacity();
 		var block_count: usize = 0;
 
 		while (pos < input.len and block_count < block_size) {
-			const match = findBestMatch(input, pos, head, prev);
-			if (match.len >= min_match_len) {
+			const best_match = findBestMatch(input, pos, head, prev);
+			if (best_match.len >= min_match_len) {
 				try tokens.append(allocator, .{
 					.match = .{
-						.len = @intCast(match.len),
-						.offset = @intCast(match.offset),
+						.len = @intCast(best_match.len),
+						.offset = @intCast(best_match.offset),
 					},
 				});
-				for (0..match.len) |k| insertMatcherPos(input, pos + k, head, prev);
-				pos += match.len;
+				for (0..best_match.len) |k| insertMatcherPos(input, pos + k, head, prev);
+				pos += best_match.len;
 				block_count += 3;
-				continue;
+			} else {
+				try tokens.append(allocator, .{ .literal = input[pos] });
+				insertMatcherPos(input, pos, head, prev);
+				pos += 1;
+				block_count += 2;
 			}
+		}
 
-			try tokens.append(allocator, .{ .literal = input[pos] });
-			insertMatcherPos(input, pos, head, prev);
-			pos += 1;
-			block_count += 2;
+		if (progress != null and (pos == input.len or pos - last_report >= progress_report_step)) {
+			progress.?.add(pos - last_report);
+			last_report = pos;
 		}
 
 		if (tokens.items.len == 0) break;
@@ -743,8 +893,13 @@ fn collectTokenBlocks(allocator: std.mem.Allocator, input: []const u8) Error![]B
 		@memcpy(owned, tokens.items);
 		try blocks.append(allocator, .{
 			.tokens = owned,
+			.input_len = pos - block_start,
 			.has_more = false,
 		});
+	}
+
+	if (progress != null and last_report < input.len) {
+		progress.?.add(input.len - last_report);
 	}
 
 	for (blocks.items, 0..) |*block, i| {
@@ -752,6 +907,188 @@ fn collectTokenBlocks(allocator: std.mem.Allocator, input: []const u8) Error![]B
 	}
 
 	return try blocks.toOwnedSlice(allocator);
+}
+
+fn buildTokenSegments(allocator: std.mem.Allocator, input_len: usize) ![]TokenizeSegment {
+	if (input_len == 0) return try allocator.alloc(TokenizeSegment, 0);
+	const count = (input_len + token_segment_size - 1) / token_segment_size;
+	const prefix_len = window_size - 1;
+	const segments = try allocator.alloc(TokenizeSegment, count);
+	for (segments, 0..) |*segment, idx| {
+		const start = idx * token_segment_size;
+		const end = @min(start + token_segment_size, input_len);
+		segment.* = .{
+			.start = start,
+			.end = end,
+			.prefix_start = if (start > prefix_len) start - prefix_len else 0,
+		};
+	}
+	return segments;
+}
+
+fn workerCollectTokenSegments(ctx: *TokenizeWorkerCtx) void {
+	const allocator = ctx.arena.allocator();
+	var idx = ctx.worker_id;
+	while (idx < ctx.segments.len) : (idx += ctx.step) {
+		const segment = ctx.segments[idx];
+		const blocks = collectTokenBlocksForRange(
+			allocator,
+			ctx.input,
+			segment.start,
+			segment.end,
+			segment.prefix_start,
+			ctx.progress,
+		) catch |err| {
+			ctx.err = err;
+			return;
+		};
+		ctx.results[idx] = blocks;
+	}
+}
+
+fn tokenCost(tok: Token) usize {
+	return switch (tok) {
+		.literal => 2,
+		.match => 3,
+	};
+}
+
+fn tokenInputLen(tok: Token) usize {
+	return switch (tok) {
+		.literal => 1,
+		.match => |m| @as(usize, m.len),
+	};
+}
+
+fn appendFinalizedBlock(
+	allocator: std.mem.Allocator,
+	blocks: *std.ArrayListUnmanaged(BlockTokens),
+	tokens: *std.ArrayListUnmanaged(Token),
+	input_len: usize,
+) !void {
+	if (tokens.items.len == 0) return;
+	const owned = try tokens.toOwnedSlice(allocator);
+	try blocks.append(allocator, .{
+		.tokens = owned,
+		.input_len = input_len,
+		.has_more = false,
+	});
+}
+
+fn collectTokenBlocks(
+	allocator: std.mem.Allocator,
+	input: []const u8,
+	worker_limit: usize,
+	progress_cb: ?EncodeProgressFn,
+	progress_ctx: ?*anyopaque,
+	total_work: usize,
+) Error![]BlockTokens {
+	const segments = try buildTokenSegments(allocator, input.len);
+	defer allocator.free(segments);
+
+	if (segments.len == 0) return try allocator.alloc(BlockTokens, 0);
+
+	var progress = TokenizeProgressReporter{
+		.callback = progress_cb,
+		.ctx = progress_ctx,
+		.total_work = total_work,
+		.phase_limit = input.len,
+	};
+	const progress_ptr: ?*TokenizeProgressReporter = if (progress_cb != null) &progress else null;
+
+	if (segments.len == 1) {
+		const blocks = try collectTokenBlocksSequentialDirect(allocator, input, progress_ptr);
+		if (progress_ptr) |p| p.complete();
+		return blocks;
+	}
+
+	const worker_count = chooseWorkerCount(worker_limit, segments.len);
+	const results = try allocator.alloc(?SegmentTokens, segments.len);
+	defer allocator.free(results);
+	@memset(results, null);
+
+	var contexts = try allocator.alloc(TokenizeWorkerCtx, worker_count);
+	defer {
+		for (contexts) |*ctx| ctx.arena.deinit();
+		allocator.free(contexts);
+	}
+
+	for (contexts, 0..) |*ctx, worker_id| {
+		ctx.* = .{
+			.input = input,
+			.segments = segments,
+			.results = results,
+			.worker_id = worker_id,
+			.step = worker_count,
+			.progress = progress_ptr,
+			.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+		};
+	}
+
+	var threads = try allocator.alloc(std.Thread, worker_count - 1);
+	defer allocator.free(threads);
+
+	var spawned: usize = 0;
+	var spawn_failed = false;
+	var worker_id: usize = 1;
+	while (worker_id < worker_count) : (worker_id += 1) {
+		threads[spawned] = std.Thread.spawn(.{}, workerCollectTokenSegments, .{&contexts[worker_id]}) catch {
+			spawn_failed = true;
+			break;
+		};
+		spawned += 1;
+	}
+
+	workerCollectTokenSegments(&contexts[0]);
+
+	for (threads[0..spawned]) |thread| thread.join();
+
+	if (spawn_failed) {
+		var fallback_worker = spawned + 1;
+		while (fallback_worker < worker_count) : (fallback_worker += 1) {
+			workerCollectTokenSegments(&contexts[fallback_worker]);
+		}
+	}
+
+	for (contexts) |ctx| {
+		if (ctx.err) |err| return err;
+	}
+
+	var merged_blocks: std.ArrayListUnmanaged(BlockTokens) = .{};
+	errdefer {
+		for (merged_blocks.items) |block| allocator.free(block.tokens);
+		merged_blocks.deinit(allocator);
+	}
+
+	var current_tokens: std.ArrayListUnmanaged(Token) = .{};
+	errdefer current_tokens.deinit(allocator);
+	var current_block_cost: usize = 0;
+	var current_input_len: usize = 0;
+
+	for (results) |maybe_segment| {
+		const segment = maybe_segment orelse continue;
+		for (segment.tokens) |tok| {
+			try current_tokens.append(allocator, tok);
+			current_block_cost = std.math.add(usize, current_block_cost, tokenCost(tok)) catch std.math.maxInt(usize);
+			current_input_len = std.math.add(usize, current_input_len, tokenInputLen(tok)) catch std.math.maxInt(usize);
+			if (current_block_cost >= block_size) {
+				try appendFinalizedBlock(allocator, &merged_blocks, &current_tokens, current_input_len);
+				current_block_cost = 0;
+				current_input_len = 0;
+			}
+		}
+	}
+	try appendFinalizedBlock(allocator, &merged_blocks, &current_tokens, current_input_len);
+	current_tokens.deinit(allocator);
+
+	const merged = try merged_blocks.toOwnedSlice(allocator);
+	if (merged.len > 0) {
+		for (merged[0 .. merged.len - 1]) |*block| block.has_more = true;
+		merged[merged.len - 1].has_more = false;
+	}
+
+	if (progress_ptr) |p| p.complete();
+	return merged;
 }
 
 fn chooseWorkerCount(worker_limit: usize, block_count: usize) usize {
@@ -774,15 +1111,21 @@ fn workerEncodeBlocks(ctx: *WorkerCtx) void {
 			return;
 		};
 		ctx.results[idx] = encoded;
+		if (ctx.progress) |progress| progress.blockDone(block.input_len);
 	}
 }
 
-fn encodeBlocksSequential(allocator: std.mem.Allocator, blocks: []const BlockTokens) Error![]u8 {
+fn encodeBlocksSequential(
+	allocator: std.mem.Allocator,
+	blocks: []const BlockTokens,
+	progress: ?*EncodeProgressReporter,
+) Error![]u8 {
 	var out: std.ArrayListUnmanaged(u8) = .{};
 	errdefer out.deinit(allocator);
 	try out.ensureTotalCapacity(allocator, blocks.len * 8);
 	for (blocks) |block| {
 		try encodeBlockTokens(allocator, &out, block.tokens, block.has_more);
+		if (progress) |p| p.blockDone(block.input_len);
 	}
 	return try out.toOwnedSlice(allocator);
 }
@@ -791,6 +1134,7 @@ fn encodeBlocksParallel(
 	allocator: std.mem.Allocator,
 	blocks: []const BlockTokens,
 	worker_count: usize,
+	progress: ?*EncodeProgressReporter,
 ) Error![]u8 {
 	const results = try allocator.alloc(?[]u8, blocks.len);
 	defer allocator.free(results);
@@ -808,6 +1152,7 @@ fn encodeBlocksParallel(
 			.results = results,
 			.worker_id = worker_id,
 			.step = worker_count,
+			.progress = progress,
 			.arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
 		};
 	}
@@ -859,24 +1204,54 @@ fn encodeBlocksParallel(
 	return out;
 }
 
-pub fn encodeWithWorkerLimit(allocator: std.mem.Allocator, input: []const u8, worker_limit: usize) Error![]u8 {
-	const blocks = try collectTokenBlocks(allocator, input);
+pub fn encodeWithWorkerLimitAndProgress(
+	allocator: std.mem.Allocator,
+	input: []const u8,
+	worker_limit: usize,
+	progress_cb: ?EncodeProgressFn,
+	progress_ctx: ?*anyopaque,
+) Error![]u8 {
+	const total_work = if (input.len == 0)
+		@as(usize, 1)
+	else
+		(std.math.mul(usize, input.len, 2) catch std.math.maxInt(usize));
+	if (progress_cb) |cb| cb(progress_ctx, 0, total_work);
+
+	const blocks = try collectTokenBlocks(allocator, input, worker_limit, progress_cb, progress_ctx, total_work);
 	defer {
 		for (blocks) |block| allocator.free(block.tokens);
 		allocator.free(blocks);
 	}
 
-	if (blocks.len == 0) return try allocator.alloc(u8, 0);
+	if (blocks.len == 0) {
+		if (progress_cb) |cb| cb(progress_ctx, total_work, total_work);
+		return try allocator.alloc(u8, 0);
+	}
+
+	var reporter = EncodeProgressReporter{
+		.callback = progress_cb,
+		.ctx = progress_ctx,
+		.total_work = total_work,
+		.base_work = input.len,
+	};
+	const reporter_ptr: ?*EncodeProgressReporter = if (progress_cb != null) &reporter else null;
 
 	const worker_count = chooseWorkerCount(worker_limit, blocks.len);
-	if (worker_count <= 1 or blocks.len < 2) {
-		return try encodeBlocksSequential(allocator, blocks);
-	}
-	return try encodeBlocksParallel(allocator, blocks, worker_count);
+	const encoded = if (worker_count <= 1 or blocks.len < 2)
+		try encodeBlocksSequential(allocator, blocks, reporter_ptr)
+	else
+		try encodeBlocksParallel(allocator, blocks, worker_count, reporter_ptr);
+
+	if (reporter_ptr) |ptr| ptr.complete();
+	return encoded;
+}
+
+pub fn encodeWithWorkerLimit(allocator: std.mem.Allocator, input: []const u8, worker_limit: usize) Error![]u8 {
+	return try encodeWithWorkerLimitAndProgress(allocator, input, worker_limit, null, null);
 }
 
 pub fn encode(allocator: std.mem.Allocator, input: []const u8) Error![]u8 {
-	return try encodeWithWorkerLimit(allocator, input, 0);
+	return try encodeWithWorkerLimitAndProgress(allocator, input, 0, null, null);
 }
 
 pub fn decode(allocator: std.mem.Allocator, compressed: []const u8, expected_len: usize) Error![]u8 {

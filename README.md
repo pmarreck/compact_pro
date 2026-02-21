@@ -68,6 +68,7 @@ Usage:
     - `--progress` forces progress output to stderr.
     - `--no-progress` disables progress output.
     - default is progress on TTY stderr.
+    - live output renders phase bars with percent and ETA, e.g. `[=====>-----] 42% (ETA: 35s)`.
   - `-o` is optional; default output is derived from filename (or cwd for multi-input).
   - If `-o` is provided without `.cpt`, `.cpt` is appended automatically.
   - `-o -` writes archive bytes to stdout.
@@ -84,6 +85,7 @@ Usage:
     - `--progress` forces progress output to stderr.
     - `--no-progress` disables progress output.
     - default is progress on TTY stderr.
+    - live output renders phase bars with percent and ETA.
   - `--path <entry>` may be repeated to extract only selected entries.
   - Restores file and directory metadata from the appended trailer when present.
   - Unsupported/unrestorable fields emit explicit warnings with the specific field name and do not abort data extraction.
@@ -95,6 +97,7 @@ Usage:
     - `--progress` forces progress output to stderr.
     - `--no-progress` disables progress output.
     - default is progress on TTY stderr.
+    - live output renders phase bars with percent and ETA.
   - Regenerates the appended metadata trailer so metadata remains synchronized after updates.
 
 - `list`

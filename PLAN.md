@@ -34,6 +34,9 @@
 - [x] Reproduce and fix The Unarchiver incompatibility for generated archives by adding a `unar` multi-block regression and correcting LZH multi-block writer termination semantics (allowing block-token overshoot to reach `block_count >= 0x1fff0`). (completed 2026-02-20 20:20 EST)
 - [x] Optimization pass: speed up LZH encode match search via best-length candidate prefiltering, validate with full suite + benchmark rerun. (completed 2026-02-20 21:52 EST)
 - [x] Optimization pass: implement concurrent LZH block encoding pipeline (sequential match/token phase + parallel block Huffman/bitstream emission with ordered merge), and lock deterministic output with worker-limit regression tests. (completed 2026-02-20 23:16 EST)
+- [x] Upgrade CLI progress UX: byte-based `compress-read`, real `compress-encode` progress via core/FFI callback, progress bar rendering, and ETA output in live/non-live modes. (completed 2026-02-20 23:29 EST)
+- [x] Refine progress UX: remove low-value `compress-read` output and extend LZH encode progress callbacks across tokenization + parallel block encoding so `compress-encode` ETA remains informative during long runs. (completed 2026-02-20 23:38 EST)
+- [x] Bold optimization pass: parallelize LZH tokenization over deterministic overlap-seeded segments with global block reassembly (preserving Compact Pro block semantics) plus a multi-segment worker-determinism regression test. (completed 2026-02-21 06:58 EST)
 
 ## Continuity
 

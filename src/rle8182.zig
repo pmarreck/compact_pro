@@ -6,6 +6,8 @@ pub const Error = error{
 	OutputLengthMismatch,
 } || std.mem.Allocator.Error;
 
+pub const EncodeProgressFn = *const fn (?*anyopaque, usize, usize) void;
+
 pub fn decode(
 	allocator: std.mem.Allocator,
 	input: []const u8,
@@ -88,11 +90,19 @@ pub fn decode(
 	return out;
 }
 
-pub fn encode(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+pub fn encodeWithProgress(
+	allocator: std.mem.Allocator,
+	raw: []const u8,
+	progress_cb: ?EncodeProgressFn,
+	progress_ctx: ?*anyopaque,
+) ![]u8 {
 	var out: std.ArrayListUnmanaged(u8) = .{};
 	errdefer out.deinit(allocator);
 	try out.ensureTotalCapacity(allocator, raw.len + raw.len / 2 + 8);
 
+	if (progress_cb) |cb| cb(progress_ctx, 0, raw.len);
+	var last_report: usize = 0;
+	const report_step: usize = 256 * 1024;
 	var i: usize = 0;
 	while (i < raw.len) {
 		if (raw[i] != 0x81) {
@@ -129,6 +139,10 @@ pub fn encode(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 				rem -= additional;
 			}
 			i += run_len;
+			if (progress_cb != null and (i == raw.len or i - last_report >= report_step)) {
+				progress_cb.?(progress_ctx, i, raw.len);
+				last_report = i;
+			}
 			continue;
 		}
 
@@ -148,9 +162,18 @@ pub fn encode(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
 		emit[run_81] = next;
 		if (next == 0x82) emit[run_81 + 1] = 0x00;
 		i += run_81 + 1;
+		if (progress_cb != null and (i == raw.len or i - last_report >= report_step)) {
+			progress_cb.?(progress_ctx, i, raw.len);
+			last_report = i;
+		}
 	}
 
+	if (progress_cb != null and last_report != raw.len) progress_cb.?(progress_ctx, raw.len, raw.len);
 	return try out.toOwnedSlice(allocator);
+}
+
+pub fn encode(allocator: std.mem.Allocator, raw: []const u8) ![]u8 {
+	return try encodeWithProgress(allocator, raw, null, null);
 }
 
 fn countByteRun(raw: []const u8, start: usize) usize {
