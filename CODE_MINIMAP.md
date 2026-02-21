@@ -34,7 +34,7 @@
   - Header CRC validation/generation now covers the full metadata envelope expected by legacy tooling: entry count, comment, and all serialized entry records up to payload start.
   - Returns explicit unsupported errors for encrypted paths.
   - Read path decodes LZH forks through `src/lzh.zig`.
-  - Write path now picks per-fork compression strategy (`RLE` vs `LZH(RLE)`) by encoded size and persists Compact Pro LZH flags in entry metadata.
+  - Write path picks per-fork compression strategy (`RLE` vs `LZH(RLE)`) by encoded size and emits full multi-block LZH streams using legacy block-count termination semantics (`>= 0x1fff0` with overshoot-permitted final token).
 
 - `src/ffi.zig`
   - C ABI layer over core.
@@ -62,10 +62,10 @@
   - `compress` supports optional `-o` (default archive naming), `~` path expansion, auto `.cpt` suffix for named outputs, stdin input via `-`, and stdout output via `-`.
 
 - `tests/unit/zig_unit_tests.zig`
-  - Unit tests for RLE behavior (including repeated-byte compression, literal/run/escape boundary encoding, and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, LZH fixture extraction/hash verification, LZH encode/decode roundtrip, write-path LZH flag selection, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
+  - Unit tests for RLE behavior (including repeated-byte compression, literal/run/escape boundary encoding, and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, LZH fixture extraction/hash verification, single- and multi-block LZH encode/decode roundtrip, write-path LZH flag selection, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
 
 - `tests/cli/test_cli.sh`
-  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, LZH fixture extraction, progress flags, trailer accounting output, and cross-OS metadata warning behavior.
+  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, LZH fixture extraction, external `unar` compatibility regression for generated archives, progress flags, trailer accounting output, and cross-OS metadata warning behavior.
 
 - `build.zig`
   - Zig build graph for static library, CLI executable, and unit-test step.

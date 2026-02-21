@@ -31,6 +31,7 @@
 - [x] Optimization pass: speed up RLE encoder via literal-span batching and vectorized run-length scanning; validate with full test suite and benchmark rerun (`compact-pro` compress wall ~117.35ms -> ~111.45ms on `./bm --runs 2`). (completed 2026-02-20 17:47 EST)
 - [x] Implement LZH decode in pure Zig core (LZH+RLE pipeline) and validate against real Compact Pro fixture (`MacEnvy21.cpt`) via strict CRC + SHA-256 resource hash + CLI regression. (completed 2026-02-20 18:35 EST)
 - [x] Implement LZH encode in pure Zig core and wire archive writes to choose per-fork `RLE` vs `LZH(RLE)` by size, with metadata flag persistence and external `lsar`/`unar` verification. (completed 2026-02-20 18:46 EST)
+- [x] Reproduce and fix The Unarchiver incompatibility for generated archives by adding a `unar` multi-block regression and correcting LZH multi-block writer termination semantics (allowing block-token overshoot to reach `block_count >= 0x1fff0`). (completed 2026-02-20 20:20 EST)
 
 ## Continuity
 

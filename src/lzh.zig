@@ -680,9 +680,9 @@ pub fn encode(allocator: std.mem.Allocator, input: []const u8) Error![]u8 {
 		tokens.clearRetainingCapacity();
 		var block_count: usize = 0;
 
-		while (pos < input.len) {
+		while (pos < input.len and block_count < block_size) {
 			const match = findBestMatch(input, pos, head, prev);
-			if (match.len >= min_match_len and block_count + 3 <= block_size) {
+			if (match.len >= min_match_len) {
 				try tokens.append(allocator, .{
 					.match = .{
 						.len = @intCast(match.len),
@@ -695,7 +695,6 @@ pub fn encode(allocator: std.mem.Allocator, input: []const u8) Error![]u8 {
 				continue;
 			}
 
-			if (block_count + 2 > block_size) break;
 			try tokens.append(allocator, .{ .literal = input[pos] });
 			insertMatcherPos(input, pos, head, prev);
 			pos += 1;

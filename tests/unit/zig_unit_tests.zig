@@ -89,6 +89,30 @@ test "lzh roundtrip over rle payload" {
 	try std.testing.expectEqualSlices(u8, raw, decoded);
 }
 
+test "lzh roundtrip over multi block payload" {
+	const len = 200_000;
+	const raw = try allocator().alloc(u8, len);
+	defer allocator().free(raw);
+
+	var x: u32 = 0x1234ABCD;
+	for (raw) |*b| {
+		x ^= x << 13;
+		x ^= x >> 17;
+		x ^= x << 5;
+		b.* = @truncate(x);
+	}
+
+	const rle_payload = try core.rle8182.encode(allocator(), raw);
+	defer allocator().free(rle_payload);
+	try std.testing.expect(rle_payload.len > 70_000);
+
+	const lzh_payload = try core.lzh.encode(allocator(), rle_payload);
+	defer allocator().free(lzh_payload);
+	const decoded = try core.lzh.decode(allocator(), lzh_payload, raw.len);
+	defer allocator().free(decoded);
+	try std.testing.expectEqualSlices(u8, raw, decoded);
+}
+
 test "archive create sets lzh data flag when lzh wins" {
 	const segment = "LZH-PATTERN-0123456789";
 	const repeat_count = 16384;
