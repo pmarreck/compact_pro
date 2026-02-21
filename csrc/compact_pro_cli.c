@@ -30,6 +30,7 @@
 #if defined(__APPLE__)
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/xattr.h>
 #endif
 #if defined(_WIN32)
 #include <direct.h>
@@ -1717,6 +1718,39 @@ static int write_linux_xattr(const char *path, const char *name, const uint8_t *
 #endif
 }
 
+static int read_macos_resource_fork_optional(const char *path, uint8_t **out, size_t *out_len) {
+#if defined(__APPLE__)
+	*out = NULL;
+	*out_len = 0;
+
+	errno = 0;
+	ssize_t need = getxattr(path, "com.apple.ResourceFork", NULL, 0, 0, 0);
+	if (need < 0) {
+		if (errno == ENOATTR || errno == ENODATA || errno == ENOTSUP) return 0;
+		fprintf(stderr, "error: getxattr failed for %s (com.apple.ResourceFork): %s\n", path, strerror(errno));
+		return 1;
+	}
+	if (need == 0) return 0;
+
+	uint8_t *buf = (uint8_t *)malloc((size_t)need);
+	if (buf == NULL) return fail("out of memory");
+	ssize_t got = getxattr(path, "com.apple.ResourceFork", buf, (size_t)need, 0, 0);
+	if (got < 0) {
+		fprintf(stderr, "error: getxattr read failed for %s (com.apple.ResourceFork): %s\n", path, strerror(errno));
+		free(buf);
+		return 1;
+	}
+	*out = buf;
+	*out_len = (size_t)got;
+	return 0;
+#else
+	(void)path;
+	(void)out;
+	(void)out_len;
+	return 0;
+#endif
+}
+
 static int read_resource_for_input(const char *data_path, const selectors *s, uint8_t **out, size_t *out_len) {
 	*out = NULL;
 	*out_len = 0;
@@ -1735,11 +1769,7 @@ static int read_resource_for_input(const char *data_path, const selectors *s, ui
 		return read_linux_xattr_optional(data_path, s->xattr_name, out, out_len);
 	}
 #if defined(__APPLE__)
-	char *named = namedfork_path_for(data_path);
-	if (named == NULL) return fail("out of memory");
-	int rc = read_file_optional(named, out, out_len);
-	free(named);
-	return rc;
+	return read_macos_resource_fork_optional(data_path, out, out_len);
 #else
 	return 0;
 #endif

@@ -48,6 +48,8 @@ mode_dst="$(stat --printf='%a' "$tmp_dir/out-a/input.txt")"
 
 list_a="$("./zig-out/bin/compact-pro" list "$tmp_dir/a.cpt")"
 [[ "$list_a" == *"input.txt"* ]]
+[[ "$list_a" == *$'input.txt\tdata='* ]]
+[[ "$list_a" == *"rsrc=0"* ]]
 [[ "$list_a" != *".compact-pro.meta.bin"* ]]
 [[ "$list_a" == *"trailer_size="* ]]
 
@@ -81,6 +83,15 @@ if [[ "$(uname -s)" != "Windows_NT" ]]; then
 	[[ "$warn_out" == *"ntfs creation time"* ]]
 	[[ "$warn_out" == *"ntfs access time"* ]]
 	[[ "$warn_out" == *"ntfs write time"* ]]
+fi
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+	printf 'fork carrier\n' >"$tmp_dir/hasfork.txt"
+	printf 'resource-bytes' >"$tmp_dir/hasfork.txt/..namedfork/rsrc"
+	./zig-out/bin/compact-pro compress -o "$tmp_dir/hasfork.cpt" "$tmp_dir/hasfork.txt"
+	hasfork_line="$("./zig-out/bin/compact-pro" list "$tmp_dir/hasfork.cpt" | grep 'hasfork.txt')"
+	rsrc_size="$(printf '%s\n' "$hasfork_line" | sed -E 's/.*rsrc=([0-9]+).*/\1/')"
+	[[ "$rsrc_size" -gt 0 ]]
 fi
 
 space_input="$home_tmp/A Good Night's Sleep - Anna Wahlgren.pdf"

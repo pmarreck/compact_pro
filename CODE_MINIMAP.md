@@ -63,6 +63,7 @@
   - Captures directory metadata recursively from directory inputs (including empty directories) and recreates metadata-recorded empty directories on expand.
   - `compress`/`expand` print completion stats to stderr (bytes, ratio/percent, MB/s, elapsed).
   - Progress UI now renders bar + percent + ETA (`progress: <phase> [====>----] 42% (done/total) (ETA: Ns)`), focused on meaningful long phases (`compress-encode`, `add-encode`, `expand-decode`, `expand-write`) with callback-driven encode updates from core.
+  - macOS default resource-fork ingestion now reads only real `com.apple.ResourceFork` xattr content; it no longer blindly ingests `..namedfork/rsrc` bytes that may be filesystem-compression backing data.
   - Implements `expand --path` selective extraction.
   - Implements appended metadata trailer v2 with hierarchical file/dir metadata records and per-field masks.
   - Restores metadata best-effort and emits explicit per-field warnings for unsupported/unrestorable fields (including cross-OS NTFS/Apple metadata cases).
@@ -73,7 +74,7 @@
   - Unit tests for RLE behavior (including repeated-byte compression, literal/run/escape boundary encoding, and `0x81,0x81,0x81,0x82` regression), archive roundtrip/create/add, fixture metadata parse, LZH fixture extraction/hash verification, single- and multi-block LZH encode/decode roundtrip, deterministic multi-worker LZH encoding (`worker_limit=1` vs `4`), deterministic multi-segment LZH encoding (`worker_limit=1` vs `4` on >16 MiB payload), LZH progress callback phase coverage (token + encode), write-path LZH flag selection, Compact Pro subtree-count encoding semantics, and header-CRC metadata coverage compatibility.
 
 - `tests/cli/test_cli.sh`
-  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, LZH fixture extraction, external `unar` compatibility regression for generated archives, progress flags (including bar + ETA output), trailer accounting output, and cross-OS metadata warning behavior.
+  - End-to-end CLI tests for help surface, compress/expand/add/list, selective extraction, sidecar handling, directory path roundtrip (including directory input paths with spaces), empty-directory metadata roundtrip, no-clobber vs `--force` overwrite behavior, directory metadata restore, LZH fixture extraction, external `unar` compatibility regression for generated archives, progress flags (including bar + ETA output), trailer accounting output, cross-OS metadata warning behavior, and macOS default resource-fork gating behavior.
 
 - `build.zig`
   - Zig build graph for static library, CLI executable, and unit-test step.

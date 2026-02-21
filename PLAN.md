@@ -37,6 +37,7 @@
 - [x] Upgrade CLI progress UX: byte-based `compress-read`, real `compress-encode` progress via core/FFI callback, progress bar rendering, and ETA output in live/non-live modes. (completed 2026-02-20 23:29 EST)
 - [x] Refine progress UX: remove low-value `compress-read` output and extend LZH encode progress callbacks across tokenization + parallel block encoding so `compress-encode` ETA remains informative during long runs. (completed 2026-02-20 23:38 EST)
 - [x] Bold optimization pass: parallelize LZH tokenization over deterministic overlap-seeded segments with global block reassembly (preserving Compact Pro block semantics) plus a multi-segment worker-determinism regression test. (completed 2026-02-21 06:58 EST)
+- [x] Fix macOS default resource-fork ingestion: avoid pulling filesystem-compression backing streams from `..namedfork/rsrc` by requiring real `com.apple.ResourceFork` xattr presence in default mode. (completed 2026-02-21 09:59 EST)
 
 ## Continuity
 
