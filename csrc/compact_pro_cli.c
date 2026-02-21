@@ -1718,8 +1718,8 @@ static int write_linux_xattr(const char *path, const char *name, const uint8_t *
 #endif
 }
 
-static int read_macos_resource_fork_optional(const char *path, uint8_t **out, size_t *out_len) {
 #if defined(__APPLE__)
+static int read_macos_resource_fork_optional(const char *path, uint8_t **out, size_t *out_len) {
 	*out = NULL;
 	*out_len = 0;
 
@@ -1743,13 +1743,8 @@ static int read_macos_resource_fork_optional(const char *path, uint8_t **out, si
 	*out = buf;
 	*out_len = (size_t)got;
 	return 0;
-#else
-	(void)path;
-	(void)out;
-	(void)out_len;
-	return 0;
-#endif
 }
+#endif
 
 static int read_resource_for_input(const char *data_path, const selectors *s, uint8_t **out, size_t *out_len) {
 	*out = NULL;
