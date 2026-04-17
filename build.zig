@@ -32,8 +32,10 @@ pub fn build(b: *std.Build) void {
 	});
 	exe.addIncludePath(b.path("include"));
 	// On macOS in Nix sandbox, Zig's C compiler needs the SDK sysroot for system headers (e.g. sys/xattr.h).
-	if (std.posix.getenv("SDKROOT")) |sdkroot| {
-		exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdkroot}) });
+	if (target.result.os.tag == .macos) {
+		if (std.process.getEnvVarOwned(b.allocator, "SDKROOT")) |sdkroot| {
+			exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdkroot}) });
+		} else |_| {}
 	}
 	exe.linkLibrary(lib);
 	exe.linkLibC();
