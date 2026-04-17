@@ -31,6 +31,10 @@ pub fn build(b: *std.Build) void {
 		.flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
 	});
 	exe.addIncludePath(b.path("include"));
+	// On macOS in Nix sandbox, Zig's C compiler needs the SDK sysroot for system headers (e.g. sys/xattr.h).
+	if (std.posix.getenv("SDKROOT")) |sdkroot| {
+		exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdkroot}) });
+	}
 	exe.linkLibrary(lib);
 	exe.linkLibC();
 	b.installArtifact(exe);

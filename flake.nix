@@ -21,6 +21,9 @@
 			version = "0.1.0";
 			src = self;
 			nativeBuildInputs = [ pkgs.zig pkgs.clang pkgs.gcc ];
+			buildInputs = lib.optionals pkgs.stdenv.isDarwin [
+				pkgs.apple-sdk
+			];
 			dontConfigure = true;
 			buildPhase = ''
 				runHook preBuild
@@ -53,6 +56,9 @@
 				pkgs.gnugrep
 				pkgs.gnused
 				pkgs.xxd
+			];
+			buildInputs = lib.optionals pkgs.stdenv.isDarwin [
+				pkgs.apple-sdk
 			];
 			dontConfigure = true;
 			buildPhase = ''
