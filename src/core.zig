@@ -215,17 +215,23 @@ fn parseDirectoryEntries(
 		const is_dir = (name_len_kind & 0x80) != 0;
 		const name_part = try reader.readSlice(name_len);
 		const full_name = try joinPath(allocator, prefix, name_part);
-		errdefer allocator.free(full_name);
 
 		if (is_dir) {
+			// Directory entries: full_name is only consumed as the recursion prefix.
+			// A single `defer` frees on every exit (success continue and error unwind),
+			// avoiding the double-free that an outer errdefer + inner defer would cause.
+			defer allocator.free(full_name);
 			const descendants = try reader.readU16();
 			const subtree_count: usize = @as(usize, descendants) + 1;
 			if (subtree_count > remaining) return Error.InvalidEntryCount;
-			defer allocator.free(full_name);
 			try parseDirectoryEntries(allocator, reader, acc, full_name, @intCast(descendants));
 			remaining -= subtree_count;
 			continue;
 		}
+
+		// File entries: full_name transfers to acc on successful append. errdefer
+		// handles the error path; successful iteration leaves full_name owned by acc.
+		errdefer allocator.free(full_name);
 
 		const entry = MetadataEntry{
 			.name = full_name,

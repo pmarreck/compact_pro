@@ -381,3 +381,32 @@ test "archive header crc changes when entry metadata changes" {
 	const crc_b = readU32BE(archive_b, @intCast(off_b));
 	try std.testing.expect(crc_a != crc_b);
 }
+
+test "parseMetadata: corrupted directory entry must not double-free (regression)" {
+	// Reproduces a real crash found by validate --test-coverage stress testing: a
+	// truncated CPT archive whose outer entry is a directory used to free the
+	// directory's full_name path twice (outer errdefer + inner defer on the same
+	// allocation) when the recursive parse hit Truncated. std.testing.allocator's
+	// GeneralPurposeAllocator surfaces the double-free as a test failure. Uses a
+	// non-empty directory name so the allocation is actually tracked.
+	var buf: std.ArrayListUnmanaged(u8) = .{};
+	defer buf.deinit(allocator());
+
+	// Preamble: marker(0x01) + pad(1) + pad(2) + header_offset=u32 BE -> 8
+	try buf.append(allocator(), 0x01);
+	try buf.append(allocator(), 0);
+	try buf.appendSlice(allocator(), &[_]u8{ 0, 0 });
+	try buf.appendSlice(allocator(), &[_]u8{ 0, 0, 0, 8 });
+
+	// Header: crc(u32 BE, ignored when strict=false), entry_count=2 (u16 BE),
+	// comment_len=0, then one dir entry (name_len_kind=0x83 → is_dir + name_len=3),
+	// name="dir", descendants=1, then truncated so the recursive call errors out.
+	try buf.appendSlice(allocator(), &[_]u8{ 0, 0, 0, 0 });
+	try buf.appendSlice(allocator(), &[_]u8{ 0, 2 });
+	try buf.append(allocator(), 0);
+	try buf.append(allocator(), 0x83);
+	try buf.appendSlice(allocator(), "dir");
+	try buf.appendSlice(allocator(), &[_]u8{ 0, 1 });
+
+	try std.testing.expectError(core.Error.Truncated, core.parseMetadata(allocator(), buf.items, false));
+}
