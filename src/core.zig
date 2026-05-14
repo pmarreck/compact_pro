@@ -93,7 +93,7 @@ pub const Error = error{
 
 const FileAccumulator = struct {
 	allocator: std.mem.Allocator,
-	items: std.ArrayListUnmanaged(MetadataEntry) = .{},
+	items: std.ArrayListUnmanaged(MetadataEntry) = .empty,
 
 	fn append(self: *FileAccumulator, entry: MetadataEntry) !void {
 		try self.items.append(self.allocator, entry);
@@ -298,7 +298,7 @@ pub fn extractAll(allocator: std.mem.Allocator, archive: []const u8, strict_crc:
 	const metadata = try parseMetadata(allocator, archive, strict_crc);
 	defer metadata.deinit(allocator);
 
-	var out_entries: std.ArrayListUnmanaged(ExtractedEntry) = .{};
+	var out_entries: std.ArrayListUnmanaged(ExtractedEntry) = .empty;
 	errdefer {
 		for (out_entries.items) |entry| {
 			allocator.free(entry.name);
@@ -388,12 +388,29 @@ const ForkEncoding = struct {
 	use_lzh: bool,
 };
 
+/// Minimal spinlock for short critical sections used by progress reporters.
+/// Replaces `std.Thread.Mutex` (removed in Zig 0.16) without dragging the new
+/// `std.Io.Mutex` plumbing across all worker entry points.
+const SpinMutex = struct {
+	state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+
+	fn lock(self: *SpinMutex) void {
+		while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+			std.atomic.spinLoopHint();
+		}
+	}
+
+	fn unlock(self: *SpinMutex) void {
+		self.state.store(0, .release);
+	}
+};
+
 const CreateProgress = struct {
 	callback: ?CreateArchiveProgressFn,
 	ctx: ?*anyopaque,
 	total_work: usize,
 	done_work: usize = 0,
-	mutex: std.Thread.Mutex = .{},
+	mutex: SpinMutex = .{},
 
 	fn init(callback: ?CreateArchiveProgressFn, ctx: ?*anyopaque, total_work_raw: usize) CreateProgress {
 		return .{
@@ -513,7 +530,7 @@ const TreeNode = struct {
 	name: []const u8,
 	is_dir: bool,
 	file_index: ?usize,
-	children: std.ArrayListUnmanaged(usize) = .{},
+	children: std.ArrayListUnmanaged(usize) = .empty,
 
 	fn deinit(self: *TreeNode, allocator: std.mem.Allocator) void {
 		self.children.deinit(allocator);
@@ -523,7 +540,7 @@ const TreeNode = struct {
 const TreeStats = struct {
 	entries_meta_len: usize = 0,
 	payload_len: usize = 0,
-	file_order: std.ArrayListUnmanaged(usize) = .{},
+	file_order: std.ArrayListUnmanaged(usize) = .empty,
 
 	fn deinit(self: *TreeStats, allocator: std.mem.Allocator) void {
 		self.file_order.deinit(allocator);
@@ -691,7 +708,7 @@ pub fn createArchiveWithProgress(
 	progress.setDone(0);
 	var encoded_work_done: usize = 0;
 
-	var prepared: std.ArrayListUnmanaged(PreparedEntry) = .{};
+	var prepared: std.ArrayListUnmanaged(PreparedEntry) = .empty;
 	errdefer {
 		for (prepared.items) |item| item.forks.deinit(allocator);
 		prepared.deinit(allocator);
@@ -731,7 +748,7 @@ pub fn createArchiveWithProgress(
 		});
 	}
 
-	var nodes: std.ArrayListUnmanaged(TreeNode) = .{};
+	var nodes: std.ArrayListUnmanaged(TreeNode) = .empty;
 	errdefer {
 		for (nodes.items) |*node| node.deinit(allocator);
 		nodes.deinit(allocator);
@@ -820,7 +837,7 @@ pub fn addEntries(
 	var extracted = try extractAll(allocator, archive, false);
 	defer extracted.deinit(allocator);
 
-	var combined: std.ArrayListUnmanaged(EntryInput) = .{};
+	var combined: std.ArrayListUnmanaged(EntryInput) = .empty;
 	defer combined.deinit(allocator);
 	try combined.ensureTotalCapacity(allocator, extracted.entries.len + additional.len);
 

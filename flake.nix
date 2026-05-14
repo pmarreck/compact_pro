@@ -3,9 +3,13 @@
 
 	inputs = {
 		nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+		zig-overlay = {
+			url = "github:mitchellh/zig-overlay";
+			inputs.nixpkgs.follows = "nixpkgs";
+		};
 	};
 
-	outputs = { self, nixpkgs }:
+	outputs = { self, nixpkgs, zig-overlay }:
 	let
 		lib = nixpkgs.lib;
 		host_systems = [
@@ -14,13 +18,15 @@
 			"x86_64-darwin"
 			"aarch64-darwin"
 		];
-		forAllHosts = f: lib.genAttrs host_systems (system: f (import nixpkgs { inherit system; }));
+		# Pin Zig 0.16.0 explicitly via zig-overlay so we don't get silently bumped by nixpkgs.
+		zigFor = system: zig-overlay.packages.${system}."0.16.0";
+		forAllHosts = f: lib.genAttrs host_systems (system: f (import nixpkgs { inherit system; }) (zigFor system));
 
-		mkNativeCliPackage = pkgs: pkgs.stdenv.mkDerivation {
+		mkNativeCliPackage = pkgs: zigPkg: pkgs.stdenv.mkDerivation {
 			pname = "compact-pro";
 			version = "0.1.0";
 			src = self;
-			nativeBuildInputs = [ pkgs.zig pkgs.clang pkgs.gcc ];
+			nativeBuildInputs = [ zigPkg pkgs.clang pkgs.gcc ];
 			buildInputs = lib.optionals pkgs.stdenv.isDarwin [
 				pkgs.apple-sdk
 			];
@@ -41,12 +47,12 @@
 			'';
 		};
 
-		mkCiCheck = pkgs: cfg: pkgs.stdenv.mkDerivation {
+		mkCiCheck = pkgs: zigPkg: cfg: pkgs.stdenv.mkDerivation {
 			pname = "compact-pro-ci-${cfg.name}";
 			version = "0.1.0";
 			src = self;
 			nativeBuildInputs = [
-				pkgs.zig
+				zigPkg
 				pkgs.clang
 				pkgs.gcc
 				pkgs.bash
@@ -118,19 +124,19 @@
 		checksForSystem = system:
 			let
 				pkgs = import nixpkgs { inherit system; };
+				zigPkg = zigFor system;
 				targets = lib.filter (cfg: cfg.builder_system == system) ci_targets;
 			in
 			lib.listToAttrs (map
 				(cfg: {
 					name = "ci-${cfg.name}";
-					value = mkCiCheck pkgs cfg;
+					value = mkCiCheck pkgs zigPkg cfg;
 				})
 				targets);
 	in {
-		devShells = forAllHosts (pkgs: {
+		devShells = forAllHosts (pkgs: zigPkg: {
 			default = pkgs.mkShell {
-				packages = with pkgs; [
-					zig
+				packages = [ zigPkg ] ++ (with pkgs; [
 					clang
 					gcc
 					gnumake
@@ -142,12 +148,12 @@
 					zip
 					unzip
 					gzip
-				];
+				]);
 			};
 		});
 
-		packages = forAllHosts (pkgs: {
-			compact-pro-cli = mkNativeCliPackage pkgs;
+		packages = forAllHosts (pkgs: zigPkg: {
+			compact-pro-cli = mkNativeCliPackage pkgs zigPkg;
 			default = self.packages.${pkgs.stdenv.hostPlatform.system}.compact-pro-cli;
 		});
 

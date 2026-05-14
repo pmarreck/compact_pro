@@ -96,7 +96,7 @@ pub fn encodeWithProgress(
 	progress_cb: ?EncodeProgressFn,
 	progress_ctx: ?*anyopaque,
 ) ![]u8 {
-	var out: std.ArrayListUnmanaged(u8) = .{};
+	var out: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer out.deinit(allocator);
 	try out.ensureTotalCapacity(allocator, raw.len + raw.len / 2 + 8);
 

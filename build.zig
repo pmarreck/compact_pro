@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
 		.root_source_file = b.path("src/ffi.zig"),
 		.target = target,
 		.optimize = optimize,
+		.link_libc = true,
 	});
 
 	const lib = b.addLibrary(.{
@@ -15,30 +16,31 @@ pub fn build(b: *std.Build) void {
 		.linkage = .static,
 		.root_module = ffi_module,
 	});
-	lib.linkLibC();
 	b.installArtifact(lib);
 
-	const exe = b.addExecutable(.{
-		.name = "compact-pro",
-		.root_module = b.createModule(.{
-			.root_source_file = b.path("src/main.zig"),
-			.target = target,
-			.optimize = optimize,
-		}),
+	const exe_module = b.createModule(.{
+		.root_source_file = b.path("src/main.zig"),
+		.target = target,
+		.optimize = optimize,
+		.link_libc = true,
 	});
-	exe.addCSourceFile(.{
+	exe_module.addCSourceFile(.{
 		.file = b.path("csrc/compact_pro_cli.c"),
 		.flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" },
 	});
-	exe.addIncludePath(b.path("include"));
+	exe_module.addIncludePath(b.path("include"));
 	// On macOS in Nix sandbox, Zig's C compiler needs the SDK sysroot for system headers (e.g. sys/xattr.h).
 	if (target.result.os.tag == .macos) {
-		if (std.process.getEnvVarOwned(b.allocator, "SDKROOT")) |sdkroot| {
-			exe.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdkroot}) });
-		} else |_| {}
+		if (b.graph.environ_map.get("SDKROOT")) |sdkroot| {
+			exe_module.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{sdkroot}) });
+		}
 	}
-	exe.linkLibrary(lib);
-	exe.linkLibC();
+	exe_module.linkLibrary(lib);
+
+	const exe = b.addExecutable(.{
+		.name = "compact-pro",
+		.root_module = exe_module,
+	});
 	b.installArtifact(exe);
 
 	const unit_tests = b.addTest(.{

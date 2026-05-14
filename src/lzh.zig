@@ -24,6 +24,23 @@ const max_match_len: usize = 63;
 const progress_report_step: usize = 256 * 1024;
 const token_segment_size: usize = 16 * 1024 * 1024;
 
+/// Minimal spinlock for short progress-reporter critical sections.
+/// Replaces `std.Thread.Mutex` (removed in Zig 0.16) without requiring an
+/// `io: std.Io` parameter to be threaded through every worker entry point.
+const SpinMutex = struct {
+	state: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
+
+	fn lock(self: *SpinMutex) void {
+		while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+			std.atomic.spinLoopHint();
+		}
+	}
+
+	fn unlock(self: *SpinMutex) void {
+		self.state.store(0, .release);
+	}
+};
+
 const BitReader = struct {
 	bytes: []const u8,
 	byte_index: usize = 0,
@@ -356,7 +373,7 @@ const EncodeProgressReporter = struct {
 	total_work: usize,
 	base_work: usize,
 	done_input: usize = 0,
-	mutex: std.Thread.Mutex = .{},
+	mutex: SpinMutex = .{},
 
 	fn blockDone(self: *EncodeProgressReporter, block_input_len: usize) void {
 		if (self.callback == null) return;
@@ -381,7 +398,7 @@ const TokenizeProgressReporter = struct {
 	total_work: usize,
 	phase_limit: usize,
 	done_input: usize = 0,
-	mutex: std.Thread.Mutex = .{},
+	mutex: SpinMutex = .{},
 
 	fn add(self: *TokenizeProgressReporter, delta: usize) void {
 		if (self.callback == null or delta == 0) return;
@@ -768,7 +785,7 @@ fn encodeBlockToOwned(
 	tokens: []const Token,
 	has_more_blocks: bool,
 ) Error![]u8 {
-	var out: std.ArrayListUnmanaged(u8) = .{};
+	var out: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer out.deinit(allocator);
 	try encodeBlockTokens(allocator, &out, tokens, has_more_blocks);
 	return try out.toOwnedSlice(allocator);
@@ -790,7 +807,7 @@ fn collectTokenBlocksForRange(
 	defer allocator.free(prev);
 	@memset(prev, -1);
 
-	var tokens: std.ArrayListUnmanaged(Token) = .{};
+	var tokens: std.ArrayListUnmanaged(Token) = .empty;
 
 	var seed = prefix_start;
 	while (seed < start) : (seed += 1) {
@@ -839,7 +856,7 @@ fn collectTokenBlocksSequentialDirect(
 	input: []const u8,
 	progress: ?*TokenizeProgressReporter,
 ) Error![]BlockTokens {
-	var blocks: std.ArrayListUnmanaged(BlockTokens) = .{};
+	var blocks: std.ArrayListUnmanaged(BlockTokens) = .empty;
 	errdefer {
 		for (blocks.items) |block| allocator.free(block.tokens);
 		blocks.deinit(allocator);
@@ -853,7 +870,7 @@ fn collectTokenBlocksSequentialDirect(
 	defer allocator.free(prev);
 	@memset(prev, -1);
 
-	var tokens: std.ArrayListUnmanaged(Token) = .{};
+	var tokens: std.ArrayListUnmanaged(Token) = .empty;
 	defer tokens.deinit(allocator);
 
 	var last_report: usize = 0;
@@ -1054,13 +1071,13 @@ fn collectTokenBlocks(
 		if (ctx.err) |err| return err;
 	}
 
-	var merged_blocks: std.ArrayListUnmanaged(BlockTokens) = .{};
+	var merged_blocks: std.ArrayListUnmanaged(BlockTokens) = .empty;
 	errdefer {
 		for (merged_blocks.items) |block| allocator.free(block.tokens);
 		merged_blocks.deinit(allocator);
 	}
 
-	var current_tokens: std.ArrayListUnmanaged(Token) = .{};
+	var current_tokens: std.ArrayListUnmanaged(Token) = .empty;
 	errdefer current_tokens.deinit(allocator);
 	var current_block_cost: usize = 0;
 	var current_input_len: usize = 0;
@@ -1120,7 +1137,7 @@ fn encodeBlocksSequential(
 	blocks: []const BlockTokens,
 	progress: ?*EncodeProgressReporter,
 ) Error![]u8 {
-	var out: std.ArrayListUnmanaged(u8) = .{};
+	var out: std.ArrayListUnmanaged(u8) = .empty;
 	errdefer out.deinit(allocator);
 	try out.ensureTotalCapacity(allocator, blocks.len * 8);
 	for (blocks) |block| {

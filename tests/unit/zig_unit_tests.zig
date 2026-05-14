@@ -302,7 +302,7 @@ test "archive add entries preserves old and appends new" {
 }
 
 test "archive parse fixture header" {
-	const fixture = try std.fs.cwd().readFileAlloc(allocator(), "fixtures/cpt/MacEnvy21.cpt", 1024 * 1024);
+	const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/cpt/MacEnvy21.cpt", allocator(), .limited(1024 * 1024));
 	defer allocator().free(fixture);
 
 	const meta = try core.parseMetadata(allocator(), fixture, false);
@@ -311,7 +311,7 @@ test "archive parse fixture header" {
 }
 
 test "archive extract fixture with lzh resource fork" {
-	const fixture = try std.fs.cwd().readFileAlloc(allocator(), "fixtures/cpt/MacEnvy21.cpt", 1024 * 1024);
+	const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/cpt/MacEnvy21.cpt", allocator(), .limited(1024 * 1024));
 	defer allocator().free(fixture);
 
 	var extracted = try core.extractAll(allocator(), fixture, true);
@@ -389,7 +389,7 @@ test "parseMetadata: corrupted directory entry must not double-free (regression)
 	// allocation) when the recursive parse hit Truncated. std.testing.allocator's
 	// GeneralPurposeAllocator surfaces the double-free as a test failure. Uses a
 	// non-empty directory name so the allocation is actually tracked.
-	var buf: std.ArrayListUnmanaged(u8) = .{};
+	var buf: std.ArrayListUnmanaged(u8) = .empty;
 	defer buf.deinit(allocator());
 
 	// Preamble: marker(0x01) + pad(1) + pad(2) + header_offset=u32 BE -> 8
