@@ -62,7 +62,7 @@
 				pkgs.gnugrep
 				pkgs.gnused
 				pkgs.xxd
-			];
+			] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.patchelf ];
 			buildInputs = lib.optionals pkgs.stdenv.isDarwin [
 				pkgs.apple-sdk
 			];
@@ -76,6 +76,16 @@
 				mkdir -p "$ZIG_GLOBAL_CACHE_DIR" "$ZIG_LOCAL_CACHE_DIR"
 			'' + lib.optionalString cfg.run_tests ''
 				zig build test -Doptimize=ReleaseFast
+				${lib.optionalString pkgs.stdenv.isLinux ''
+				# Zig with link_libc emits the FHS dynamic-linker path
+				# (/lib64/ld-linux-x86-64.so.2) which does not exist in the
+				# Nix build sandbox, so the freshly-built binary cannot be
+				# exec'd. Patch the interpreter to Nix's loader so the CLI
+				# test can spawn it.
+				if [ -x ./zig-out/bin/compact-pro ]; then
+					patchelf --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" ./zig-out/bin/compact-pro
+				fi
+				''}
 				bash tests/cli/test_cli.sh
 			'' + ''
 				zig build -Doptimize=ReleaseFast -Dtarget=${cfg.zig_target}
