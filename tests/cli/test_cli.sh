@@ -18,7 +18,9 @@ sha256_file() {
 	exit 1
 }
 
-zig build -Doptimize=ReleaseFast >/dev/null
+if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
+	zig build -Doptimize=ReleaseFast >/dev/null
+fi
 
 output=$(./zig-out/bin/compact-pro --help)
 [[ "$output" == *"compact-pro"* ]]
