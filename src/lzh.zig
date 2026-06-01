@@ -1283,3 +1283,137 @@ pub fn decode(allocator: std.mem.Allocator, compressed: []const u8, expected_len
 	if (decoder.out_index != expected_len) return Error.OutputLengthMismatch;
 	return out;
 }
+
+// ---------------------------------------------------------------------------
+// Inline tests for private Huffman / match-finder helpers. These cannot be
+// reached from the out-of-line suite (the helpers are file-private), so they
+// live here and run via the per-leaf test roots wired in build.zig.
+// ---------------------------------------------------------------------------
+
+test "buildCanonicalCodes matches RFC 1951 worked example" {
+	// RFC 1951 section 3.2.2: alphabet A..H with code lengths
+	// (3,3,3,3,3,2,4,4) yields canonical codes
+	// A=010 B=011 C=100 D=101 E=110 F=00 G=1110 H=1111.
+	const lengths = [_]u8{ 3, 3, 3, 3, 3, 2, 4, 4 };
+	const codes = buildCanonicalCodes(8, lengths);
+	const expected = [_]u32{ 0b010, 0b011, 0b100, 0b101, 0b110, 0b00, 0b1110, 0b1111 };
+	try std.testing.expectEqualSlices(u32, &expected, &codes);
+}
+
+test "buildCanonicalCodes assigns zero to unused symbols" {
+	const lengths = [_]u8{ 0, 0, 0, 0 };
+	const codes = buildCanonicalCodes(4, lengths);
+	try std.testing.expectEqualSlices(u32, &[_]u32{ 0, 0, 0, 0 }, &codes);
+}
+
+test "buildCanonicalCodes: equal-length codes are consecutive integers" {
+	// Four symbols all length 2 -> codes 00,01,10,11 in symbol order.
+	const lengths = [_]u8{ 2, 2, 2, 2 };
+	const codes = buildCanonicalCodes(4, lengths);
+	try std.testing.expectEqualSlices(u32, &[_]u32{ 0, 1, 2, 3 }, &codes);
+}
+
+test "buildCodeLengths produces a complete, monotone, depth-bounded code" {
+	const freqs = [_]u32{ 1, 1, 2, 3, 5, 8, 13, 21 };
+	const lengths = buildCodeLengths(8, freqs);
+
+	// Every used symbol gets a positive length; unused symbols stay zero.
+	for (freqs, 0..) |f, sym| {
+		if (f > 0) {
+			try std.testing.expect(lengths[sym] > 0);
+		} else {
+			try std.testing.expectEqual(@as(u8, 0), lengths[sym]);
+		}
+		try std.testing.expect(lengths[sym] <= 15);
+	}
+
+	// Monotonicity: a strictly more frequent symbol is never given a longer code.
+	for (freqs, 0..) |fa, a| {
+		for (freqs, 0..) |fb, b| {
+			if (fa > fb and lengths[a] != 0 and lengths[b] != 0) {
+				try std.testing.expect(lengths[a] <= lengths[b]);
+			}
+		}
+	}
+
+	// Kraft equality for a complete prefix code: sum(2^-len) == 1, computed in
+	// fixed point as sum(2^(15-len)) == 2^15.
+	var kraft: u32 = 0;
+	for (lengths) |len| {
+		if (len > 0) kraft += @as(u32, 1) << @intCast(15 - len);
+	}
+	try std.testing.expectEqual(@as(u32, 1) << 15, kraft);
+}
+
+test "buildCodeLengths edge cases: empty and single symbol" {
+	const none = buildCodeLengths(4, [_]u32{ 0, 0, 0, 0 });
+	try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 0, 0, 0 }, &none);
+
+	// A lone symbol still needs a 1-bit code (a zero-length code is unusable).
+	const one = buildCodeLengths(4, [_]u32{ 0, 7, 0, 0 });
+	try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 1, 0, 0 }, &one);
+}
+
+test "heap pops in (freq, index) order" {
+	const node_freq = [_]u64{ 5, 1, 4, 1, 3, 0, 0, 0 };
+	var heap = [_]i32{0} ** 8;
+	var heap_len: usize = 0;
+	for (0..5) |i| heapPush(&node_freq, &heap, &heap_len, @intCast(i));
+
+	// Tie-break is by index, so (freq,idx) order is (1,1)(1,3)(3,4)(4,2)(5,0).
+	const expected = [_]i32{ 1, 3, 4, 2, 0 };
+	var prev_freq: u64 = 0;
+	for (expected) |want| {
+		const got = heapPop(&node_freq, &heap, &heap_len);
+		try std.testing.expectEqual(want, got);
+		// And the popped frequencies are non-decreasing (min-heap invariant).
+		try std.testing.expect(node_freq[@intCast(got)] >= prev_freq);
+		prev_freq = node_freq[@intCast(got)];
+	}
+	try std.testing.expectEqual(@as(usize, 0), heap_len);
+}
+
+test "hash3 is deterministic and within table bounds" {
+	const a = "abcxyz";
+	const b = "abc---";
+	// Same first three bytes hash identically regardless of what follows.
+	try std.testing.expectEqual(hash3(a, 0), hash3(b, 0));
+	// Result is always a valid table index.
+	try std.testing.expect(hash3(a, 0) < hash_size);
+	try std.testing.expect(hash3("zzz", 0) < hash_size);
+	// Matches the documented mixing formula.
+	const manual = (('a' * 251) + ('b' * 67) + 'c') & hash_mask;
+	try std.testing.expectEqual(manual, hash3(a, 0));
+}
+
+test "findBestMatch finds an obvious back-reference" {
+	const data = "abcabc";
+	const head = try std.testing.allocator.alloc(i32, hash_size);
+	defer std.testing.allocator.free(head);
+	const prev = try std.testing.allocator.alloc(i32, window_size);
+	defer std.testing.allocator.free(prev);
+	@memset(head, -1);
+	@memset(prev, -1);
+
+	// Index positions 0,1,2 of the first "abc".
+	for (0..3) |pos| insertMatcherPos(data, pos, head, prev);
+
+	// At position 3 ("abc" again) the best match is the copy 3 bytes back.
+	const m = findBestMatch(data, 3, head, prev);
+	try std.testing.expectEqual(@as(usize, 3), m.offset);
+	try std.testing.expectEqual(@as(usize, 3), m.len);
+}
+
+test "findBestMatch returns no match when nothing is indexed" {
+	const data = "abcdef";
+	const head = try std.testing.allocator.alloc(i32, hash_size);
+	defer std.testing.allocator.free(head);
+	const prev = try std.testing.allocator.alloc(i32, window_size);
+	defer std.testing.allocator.free(prev);
+	@memset(head, -1);
+	@memset(prev, -1);
+
+	const m = findBestMatch(data, 0, head, prev);
+	try std.testing.expectEqual(@as(usize, 0), m.len);
+	try std.testing.expectEqual(@as(usize, 0), m.offset);
+}
