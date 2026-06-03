@@ -76,7 +76,6 @@ pub fn build(b: *std.Build) void {
 				.root_source_file = b.path(src_path),
 				.target = target,
 				.optimize = optimize,
-				.link_libc = true,
 			}),
 		});
 		test_step.dependOn(&b.addRunArtifact(mod_tests).step);
