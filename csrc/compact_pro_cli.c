@@ -3258,9 +3258,16 @@ static int cmd_list(int argc, char **argv) {
 typedef struct {
 	FILE *file;
 	const uint8_t *bytes;
+#if defined(_WIN32)
+	CRITICAL_SECTION lock;
+#else
+	pthread_mutex_t lock;
+#endif
 } verify_input;
 
-/* cp_read_at_fn over either a seekable FILE* or an in-memory stdin buffer. */
+/* Thread-safe cp_read_at_fn over either a seekable FILE* (seek+read under a
+ * lock, portable to Windows where pread is unavailable) or an in-memory stdin
+ * buffer, so cp_archive_verify_stream_parallel may call it concurrently. */
 static int verify_read_at(void *ctx, uint64_t offset, uint8_t *buffer, size_t length, size_t *out_read) {
 	verify_input *in = (verify_input *)ctx;
 	if (in->bytes != NULL) {
@@ -3268,13 +3275,24 @@ static int verify_read_at(void *ctx, uint64_t offset, uint8_t *buffer, size_t le
 		*out_read = length;
 		return 0;
 	}
+	int rc = 0;
 #if defined(_WIN32)
-	if (_fseeki64(in->file, (__int64)offset, SEEK_SET) != 0) return 1;
+	EnterCriticalSection(&in->lock);
+	if (_fseeki64(in->file, (__int64)offset, SEEK_SET) != 0) rc = 1;
 #else
-	if (fseeko(in->file, (off_t)offset, SEEK_SET) != 0) return 1;
+	pthread_mutex_lock(&in->lock);
+	if (fseeko(in->file, (off_t)offset, SEEK_SET) != 0) rc = 1;
 #endif
-	*out_read = fread(buffer, 1, length, in->file);
-	return ferror(in->file) ? 1 : 0;
+	if (rc == 0) {
+		*out_read = fread(buffer, 1, length, in->file);
+		if (ferror(in->file)) rc = 1;
+	}
+#if defined(_WIN32)
+	LeaveCriticalSection(&in->lock);
+#else
+	pthread_mutex_unlock(&in->lock);
+#endif
+	return rc;
 }
 
 /* Mirrors expand's metadata-trailer handling so verify rejects whatever expand
@@ -3317,6 +3335,44 @@ static int verify_trailer(verify_input *in, uint64_t size, uint64_t *core_size) 
 	return rc;
 }
 
+static void verify_input_close(verify_input *in, uint8_t *stdin_bytes) {
+	if (in->file != NULL) fclose(in->file);
+	free(stdin_bytes);
+#if defined(_WIN32)
+	DeleteCriticalSection(&in->lock);
+#else
+	pthread_mutex_destroy(&in->lock);
+#endif
+}
+
+/* Opens the archive (file or stdin) for range reads; returns nonzero after
+ * printing an error. On success the caller owns `in` and `*stdin_bytes`. */
+static int verify_input_open(const char *archive_path, verify_input *in, uint8_t **stdin_bytes, uint64_t *size) {
+	if (strcmp(archive_path, "-") == 0 || strcmp(archive_path, "@stdin") == 0) {
+		size_t len = 0;
+		if (read_file_required("-", stdin_bytes, &len) != 0) return 1;
+		in->bytes = *stdin_bytes;
+		*size = len;
+		return 0;
+	}
+	char *resolved = expand_tilde_path(archive_path);
+	if (resolved == NULL) return fail("out of memory");
+	in->file = fopen(resolved, "rb");
+	free(resolved);
+	if (in->file == NULL) {
+		fprintf(stderr, "error: cannot open %s: %s\n", archive_path, strerror(errno));
+		return 1;
+	}
+#if defined(_WIN32)
+	if (_fseeki64(in->file, 0, SEEK_END) != 0) return fail("cannot seek archive");
+	*size = (uint64_t)_ftelli64(in->file);
+#else
+	if (fseeko(in->file, 0, SEEK_END) != 0) return fail("cannot seek archive");
+	*size = (uint64_t)ftello(in->file);
+#endif
+	return 0;
+}
+
 static int cmd_verify(int argc, char **argv) {
 	const char *archive_path = NULL;
 	for (int i = 2; i < argc; ++i) {
@@ -3329,42 +3385,22 @@ static int cmd_verify(int argc, char **argv) {
 	if (archive_path == NULL) return fail("verify requires archive path");
 
 	verify_input in = {0};
+#if defined(_WIN32)
+	InitializeCriticalSection(&in.lock);
+#else
+	pthread_mutex_init(&in.lock, NULL);
+#endif
 	uint8_t *stdin_bytes = NULL;
 	uint64_t size = 0;
-	if (strcmp(archive_path, "-") == 0 || strcmp(archive_path, "@stdin") == 0) {
-		size_t len = 0;
-		if (read_file_required("-", &stdin_bytes, &len) != 0) return 1;
-		in.bytes = stdin_bytes;
-		size = len;
-	} else {
-		char *resolved = expand_tilde_path(archive_path);
-		if (resolved == NULL) return fail("out of memory");
-		in.file = fopen(resolved, "rb");
-		free(resolved);
-		if (in.file == NULL) {
-			fprintf(stderr, "error: cannot open %s: %s\n", archive_path, strerror(errno));
-			return 1;
-		}
-#if defined(_WIN32)
-		if (_fseeki64(in.file, 0, SEEK_END) != 0) { fclose(in.file); return fail("cannot seek archive"); }
-		size = (uint64_t)_ftelli64(in.file);
-#else
-		if (fseeko(in.file, 0, SEEK_END) != 0) { fclose(in.file); return fail("cannot seek archive"); }
-		size = (uint64_t)ftello(in.file);
-#endif
-	}
-
-	uint64_t core_size = size;
-	if (verify_trailer(&in, size, &core_size) != 0) {
-		if (in.file != NULL) fclose(in.file);
-		free(stdin_bytes);
+	uint64_t core_size = 0;
+	if (verify_input_open(archive_path, &in, &stdin_bytes, &size) != 0 || verify_trailer(&in, size, &core_size) != 0) {
+		verify_input_close(&in, stdin_bytes);
 		return 1;
 	}
 	cp_range_source source = { .read_at = verify_read_at, .ctx = &in, .size = core_size };
 	cp_verify_summary summary = {0};
-	int rc = cp_archive_verify_stream(&source, 1, NULL, NULL, &summary);
-	if (in.file != NULL) fclose(in.file);
-	free(stdin_bytes);
+	int rc = cp_archive_verify_stream_parallel(&source, 1, 0, &summary);
+	verify_input_close(&in, stdin_bytes);
 	if (rc != CP_OK) {
 		if (summary.error_offset != CP_NO_ERROR_OFFSET) {
 			fprintf(stderr, "error: verify failed: %s (archive offset %llu)\n", cp_error_string(rc), (unsigned long long)summary.error_offset);

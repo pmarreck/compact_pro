@@ -48,6 +48,7 @@
   - Adds archive-create progress callback plumbing that reports encode work units (RLE + LZH stages) for CLI progress/ETA rendering without introducing I/O into core.
   - `verifyStream` verifies an archive in bounded memory from a caller range-read callback (`RangeSource`), streaming decoded forks to an optional `ForkSink`; header walking (`parseHeader`) is shared with `parseMetadata`.
   - Data fork offsets are overflow-checked (`dataForkOffset`).
+  - `verifyStreamParallel` verifies entries on a bounded worker pool (atomic work counter, lowest-index failure wins) after a sequential header read; per-entry work is shared with the sequential path via `verifyEntry`.
   - `VerifyDiagnostics.error_offset` reports where a verification failure was detected (consumed position, or CRC-covered region start).
   - Progress accumulator is mutex-protected so callback dispatch remains safe when LZH block encoding runs concurrently.
 
@@ -55,7 +56,7 @@
   - C ABI layer over core.
   - Exposes create/add/extract/list functions and matching free functions.
   - Adds `cp_archive_create_with_progress` callback-enabled entrypoint for encode progress reporting.
-  - `cp_archive_verify_stream` bridges C range-read and fork-sink callbacks to `core.verifyStream`.
+  - `cp_archive_verify_stream` bridges C range-read and fork-sink callbacks to `core.verifyStream`; `cp_archive_verify_stream_parallel` exposes the multithreaded verifier (thread-safe `read_at` required).
   - Maps Zig errors to stable C error codes/messages.
 
 - `src/main.zig`

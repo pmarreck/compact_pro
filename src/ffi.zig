@@ -369,6 +369,27 @@ pub export fn cp_archive_verify_stream(
 	return cp_ok;
 }
 
+pub export fn cp_archive_verify_stream_parallel(
+	source: ?*const CpRangeSource,
+	strict_crc: c_int,
+	workers: usize,
+	out_summary: ?*CpVerifySummary,
+) c_int {
+	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0, .error_offset = no_error_offset };
+	const src = source orelse return cp_err_invalid_argument;
+	if (src.read_at == null) return cp_err_invalid_argument;
+
+	var bridge = StreamBridge{ .source = src.*, .sink = null, .sink_ctx = null };
+	const range = core.RangeSource{ .ctx = &bridge, .size = src.size, .readAtFn = StreamBridge.readAt };
+	var diag = core.VerifyDiagnostics{};
+	const summary = core.verifyStreamParallel(allocator, range, strict_crc != 0, workers, &diag) catch |err| {
+		if (out_summary) |s| s.error_offset = diag.error_offset orelse no_error_offset;
+		return mapError(err);
+	};
+	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed, .error_offset = no_error_offset };
+	return cp_ok;
+}
+
 pub export fn cp_buffer_free(buffer: ?*CpBuffer) void {
 	if (buffer == null) return;
 	if (toMutableSlice(buffer.?.ptr, buffer.?.len)) |slice| allocator.free(slice);

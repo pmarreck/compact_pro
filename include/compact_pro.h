@@ -174,6 +174,18 @@ int cp_archive_verify_stream(
 	cp_verify_summary *out_summary
 );
 
+/* Like cp_archive_verify_stream without a sink, but verifies entries on up
+ * to `workers` threads (0 = CPU count, capped at 16). Heap use is about
+ * workers x 128 KiB plus the entry table. source->read_at is called from several threads at
+ * once and must be thread-safe. The return code and out_summary (including
+ * error_offset) equal those of the sequential call. */
+int cp_archive_verify_stream_parallel(
+	const cp_range_source *source,
+	int strict_crc,
+	size_t workers,
+	cp_verify_summary *out_summary
+);
+
 void cp_buffer_free(cp_buffer *buffer);
 void cp_archive_output_free(cp_archive_output *archive);
 void cp_archive_listing_free(cp_archive_listing *listing);

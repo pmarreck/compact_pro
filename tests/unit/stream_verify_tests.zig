@@ -378,3 +378,101 @@ test "verifyStream reports file and header CRC failure offsets and none on succe
 	std.mem.writeInt(u32, a.bytes[a.header_at..][0..4], ~std.hash.Crc32.hash(covered), .big);
 	try expectVerifyFailureAt(a.bytes, error.FileCrcMismatch, a.fork_at);
 }
+
+/// Thread-safe read-only source for parallel verification (no shared counters).
+const SharedSource = struct {
+	bytes: []const u8,
+
+	fn readAt(ctx: ?*anyopaque, offset: u64, buf: []u8) core.ReadError!usize {
+		const self: *const SharedSource = @ptrCast(@alignCast(ctx.?));
+		if (offset >= self.bytes.len) return 0;
+		const start: usize = @intCast(offset);
+		const n = @min(@min(buf.len, 7), self.bytes.len - start);
+		@memcpy(buf[0..n], self.bytes[start..][0..n]);
+		return n;
+	}
+
+	fn source(self: *SharedSource) core.RangeSource {
+		return .{ .ctx = self, .size = self.bytes.len, .readAtFn = readAt };
+	}
+};
+
+fn buildMultiEntryArchive(gpa: std.mem.Allocator) ![]u8 {
+	var text: [900]u8 = undefined;
+	for (&text, 0..) |*b, i| b.* = "parallel verify text "[i % 21];
+	var noise: [300]u8 = undefined;
+	var prng = std.Random.DefaultPrng.init(7);
+	prng.random().bytes(&noise);
+	const entries = [_]core.EntryInput{
+		.{ .name = "a/one.txt", .data = &text, .resource = "res" },
+		.{ .name = "a/two.bin", .data = &noise, .resource = &.{} },
+		.{ .name = "b/three", .data = &[_]u8{ 0x81, 0x82, 0x00, 0x81, 0x81, 0x41, 0x41, 0x41, 0x41 }, .resource = &.{} },
+		.{ .name = "b/c/four.txt", .data = text[0..400], .resource = &.{} },
+		.{ .name = "empty", .data = &.{}, .resource = &.{} },
+		.{ .name = "five", .data = noise[0..40], .resource = text[0..120] },
+	};
+	return core.createArchive(gpa, &entries, "multi");
+}
+
+const VerifyResult = struct {
+	err: ?anyerror,
+	offset: ?u64,
+	summary: ?core.VerifySummary,
+};
+
+fn sequentialResult(archive: []const u8) VerifyResult {
+	var src = SharedSource{ .bytes = archive };
+	var diag = core.VerifyDiagnostics{};
+	const summary = core.verifyStream(allocator(), src.source(), true, null, &diag) catch |e| return .{ .err = e, .offset = diag.error_offset, .summary = null };
+	return .{ .err = null, .offset = diag.error_offset, .summary = summary };
+}
+
+fn parallelResult(archive: []const u8, workers: usize) VerifyResult {
+	var src = SharedSource{ .bytes = archive };
+	var diag = core.VerifyDiagnostics{};
+	const summary = core.verifyStreamParallel(allocator(), src.source(), true, workers, &diag) catch |e| return .{ .err = e, .offset = diag.error_offset, .summary = null };
+	return .{ .err = null, .offset = diag.error_offset, .summary = summary };
+}
+
+fn expectSameResult(want: VerifyResult, got: VerifyResult) !void {
+	try std.testing.expectEqual(want.err, got.err);
+	try std.testing.expectEqual(want.offset, got.offset);
+	try std.testing.expectEqual(want.summary, got.summary);
+}
+
+test "verifyStreamParallel equals sequential verification for every single-bit flip" {
+	const archive = try buildMultiEntryArchive(allocator());
+	defer allocator().free(archive);
+	try expectSameResult(sequentialResult(archive), parallelResult(archive, 4));
+	try std.testing.expect(sequentialResult(archive).err == null);
+
+	const work = try allocator().dupe(u8, archive);
+	defer allocator().free(work);
+	for (0..work.len) |byte_index| {
+		for (0..8) |bit| {
+			const mask = @as(u8, 1) << @intCast(bit);
+			work[byte_index] ^= mask;
+			defer work[byte_index] ^= mask;
+			try expectSameResult(sequentialResult(work), parallelResult(work, 4));
+		}
+	}
+}
+
+test "verifyStreamParallel equals sequential verification for every truncation and worker count" {
+	const archive = try buildMultiEntryArchive(allocator());
+	defer allocator().free(archive);
+	for (0..archive.len + 1) |len| {
+		const want = sequentialResult(archive[0..len]);
+		for ([_]usize{ 1, 2, 3, 16 }) |workers| try expectSameResult(want, parallelResult(archive[0..len], workers));
+	}
+}
+
+test "verifyStreamParallel memory stays bounded per worker" {
+	const archive = try buildMultiEntryArchive(allocator());
+	defer allocator().free(archive);
+	var peak = PeakAllocator{ .child = allocator() };
+	var src = SharedSource{ .bytes = archive };
+	_ = try core.verifyStreamParallel(peak.allocator(), src.source(), true, 4, null);
+	// Four workers' fixed buffers plus a small entry table and result slots.
+	try std.testing.expect(peak.peak <= 4 * core.verify_stream_memory_budget);
+}

@@ -612,6 +612,20 @@ fn verifyStreamTracked(
 	const out_buf = try allocator.alloc(u8, verify_stream_buffer_size);
 	defer allocator.free(out_buf);
 
+	const metadata = try readArchiveHeader(allocator, source, in_buf, strict_crc, pos);
+	defer metadata.deinit(allocator);
+
+	var total: u64 = 0;
+	for (metadata.entries, 0..) |meta, index| {
+		total += try verifyEntry(source, in_buf, out_buf, meta, index, strict_crc, sink, pos);
+	}
+	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total };
+}
+
+/// Reads the preamble and directory header through `in_buf`, recording the
+/// failure position in `pos` on error (header offset for a header CRC
+/// mismatch, otherwise the consumed position).
+fn readArchiveHeader(allocator: std.mem.Allocator, source: RangeSource, in_buf: []u8, strict_crc: bool, pos: *u64) Error!ParsedMetadata {
 	if (source.size < 8) return Error.Truncated;
 	var preamble_cursor = RangeCursor.init(source, in_buf, 0, 8);
 	const header_offset = readPreamble(&preamble_cursor, source.size) catch |err| {
@@ -621,38 +635,178 @@ fn verifyStreamTracked(
 
 	var header_cursor = RangeCursor.init(source, in_buf, header_offset, source.size);
 	var header = StreamReader{ .cursor = &header_cursor };
-	const metadata = parseHeader(allocator, &header, strict_crc) catch |err| {
+	return parseHeader(allocator, &header, strict_crc) catch |err| {
 		pos.* = if (err == Error.HeaderCrcMismatch) header_offset else header_cursor.pos;
 		return err;
 	};
-	defer metadata.deinit(allocator);
+}
 
-	var total: u64 = 0;
-	for (metadata.entries, 0..) |meta, index| {
-		pos.* = meta.fork_data_offset;
-		if ((meta.flags & flag_encrypted) != 0) return Error.UnsupportedEncryptedEntry;
-		const resource_exists = meta.resource_uncompressed_len > 0;
-		const data_exists = meta.data_uncompressed_len > 0 or !resource_exists;
-		var out = VerifySink{ .buf = out_buf, .track_crc = strict_crc, .user = sink, .entry_index = index };
+/// Decodes and CRC-checks one entry's resource and data forks with the
+/// caller's fixed buffers; returns its decoded byte count. Entries are
+/// independent of each other, which is what makes parallel verification safe.
+fn verifyEntry(
+	source: RangeSource,
+	in_buf: []u8,
+	out_buf: []u8,
+	meta: MetadataEntry,
+	index: usize,
+	strict_crc: bool,
+	sink: ?ForkSink,
+	pos: *u64,
+) Error!u64 {
+	pos.* = meta.fork_data_offset;
+	if ((meta.flags & flag_encrypted) != 0) return Error.UnsupportedEncryptedEntry;
+	const resource_exists = meta.resource_uncompressed_len > 0;
+	const data_exists = meta.data_uncompressed_len > 0 or !resource_exists;
+	var out = VerifySink{ .buf = out_buf, .track_crc = strict_crc, .user = sink, .entry_index = index };
 
-		if (resource_exists) {
-			out.fork = .resource;
-			try streamFork(pos, source, in_buf, &out, meta.fork_data_offset, meta.resource_compressed_len, meta.resource_uncompressed_len, (meta.flags & flag_lzh_resource) != 0);
-		}
-		const data_offset = try dataForkOffset(meta);
-		if (data_exists) {
-			out.fork = .data;
-			try streamFork(pos, source, in_buf, &out, data_offset, meta.data_compressed_len, meta.data_uncompressed_len, (meta.flags & flag_lzh_data) != 0);
-		}
-
-		if (strict_crc and out.crc_state != meta.file_crc) {
-			pos.* = meta.fork_data_offset;
-			return Error.FileCrcMismatch;
-		}
-		if (resource_exists) total += meta.resource_uncompressed_len;
-		if (data_exists) total += meta.data_uncompressed_len;
+	if (resource_exists) {
+		out.fork = .resource;
+		try streamFork(pos, source, in_buf, &out, meta.fork_data_offset, meta.resource_compressed_len, meta.resource_uncompressed_len, (meta.flags & flag_lzh_resource) != 0);
+	}
+	const data_offset = try dataForkOffset(meta);
+	if (data_exists) {
+		out.fork = .data;
+		try streamFork(pos, source, in_buf, &out, data_offset, meta.data_compressed_len, meta.data_uncompressed_len, (meta.flags & flag_lzh_data) != 0);
 	}
 
+	if (strict_crc and out.crc_state != meta.file_crc) {
+		pos.* = meta.fork_data_offset;
+		return Error.FileCrcMismatch;
+	}
+	var total: u64 = 0;
+	if (resource_exists) total += meta.resource_uncompressed_len;
+	if (data_exists) total += meta.data_uncompressed_len;
+	return total;
+}
+
+/// Upper bound on verification threads, whatever the caller requests.
+pub const verify_max_workers: usize = 64;
+/// Worker count used for `workers == 0`: the CPU count, capped so a large
+/// host does not trade tens of megabytes of thread stacks for little speedup
+/// (one large entry bounds the wall time anyway).
+pub const verify_default_max_workers: usize = 16;
+/// Thread stack for verification workers. The LZH decoder state (window,
+/// Huffman trees and lookup tables) needs about 45 KiB, but with libc linked
+/// std.Thread.spawn rejects stacks under 1 MiB (error.Unexpected), and a
+/// rejected spawn silently degrades to fewer workers. Untouched stack pages
+/// cost no resident memory.
+const verify_worker_stack_size: usize = 1024 * 1024;
+
+/// Multithreaded `verifyStream` without a sink: after the header is read,
+/// entries are verified concurrently, each worker with its own fixed buffers
+/// (heap use is about `workers * 2 * verify_stream_buffer_size` plus the entry
+/// table). The result, error and `error_offset` are identical to sequential
+/// verification: the lowest-index failing entry wins. `source.readAtFn` is
+/// called from several threads at once and must be thread-safe.
+/// `workers == 0` uses the CPU count, capped at `verify_default_max_workers`.
+pub fn verifyStreamParallel(
+	allocator: std.mem.Allocator,
+	source: RangeSource,
+	strict_crc: bool,
+	workers: usize,
+	diag: ?*VerifyDiagnostics,
+) Error!VerifySummary {
+	var pos: u64 = 0;
+	if (diag) |d| d.error_offset = null;
+	return verifyParallelTracked(allocator, source, strict_crc, workers, &pos) catch |err| {
+		if (diag) |d| d.error_offset = pos;
+		return err;
+	};
+}
+
+const EntryOutcome = struct {
+	err: ?Error = null,
+	pos: u64 = 0,
+	bytes: u64 = 0,
+};
+
+/// Work queue shared by verification workers: an atomic next-entry counter
+/// and the lowest failing index seen so far, so workers stop claiming entries
+/// that cannot affect the result.
+const ParallelVerify = struct {
+	source: RangeSource,
+	strict_crc: bool,
+	entries: []const MetadataEntry,
+	outcomes: []EntryOutcome,
+	next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+	first_failure: std.atomic.Value(usize) = std.atomic.Value(usize).init(std.math.maxInt(usize)),
+};
+
+const VerifyWorker = struct {
+	shared: *ParallelVerify,
+	in_buf: []u8,
+	out_buf: []u8,
+};
+
+fn runVerifyWorker(w: *VerifyWorker) void {
+	const s = w.shared;
+	while (true) {
+		const i = s.next.fetchAdd(1, .monotonic);
+		// Claims are increasing, so once past a known failure nothing later matters.
+		if (i >= s.entries.len or i > s.first_failure.load(.monotonic)) return;
+		var pos: u64 = 0;
+		if (verifyEntry(s.source, w.in_buf, w.out_buf, s.entries[i], i, s.strict_crc, null, &pos)) |bytes| {
+			s.outcomes[i] = .{ .bytes = bytes };
+		} else |err| {
+			s.outcomes[i] = .{ .err = err, .pos = pos };
+			_ = s.first_failure.fetchMin(i, .monotonic);
+		}
+	}
+}
+
+fn verifyParallelTracked(
+	allocator: std.mem.Allocator,
+	source: RangeSource,
+	strict_crc: bool,
+	requested_workers: usize,
+	pos: *u64,
+) Error!VerifySummary {
+	const header_buf = try allocator.alloc(u8, verify_stream_buffer_size);
+	defer allocator.free(header_buf);
+	const metadata = try readArchiveHeader(allocator, source, header_buf, strict_crc, pos);
+	defer metadata.deinit(allocator);
+	if (metadata.entries.len == 0) return .{ .entry_count = 0, .total_uncompressed = 0 };
+
+	const wanted = if (requested_workers == 0) @min(std.Thread.getCpuCount() catch 1, verify_default_max_workers) else requested_workers;
+	const worker_count = @max(1, @min(@min(wanted, verify_max_workers), metadata.entries.len));
+
+	const outcomes = try allocator.alloc(EntryOutcome, metadata.entries.len);
+	defer allocator.free(outcomes);
+	@memset(outcomes, .{});
+	const buffers = try allocator.alloc(u8, worker_count * 2 * verify_stream_buffer_size);
+	defer allocator.free(buffers);
+	const ctxs = try allocator.alloc(VerifyWorker, worker_count);
+	defer allocator.free(ctxs);
+	const threads = try allocator.alloc(std.Thread, worker_count);
+	defer allocator.free(threads);
+
+	var shared = ParallelVerify{ .source = source, .strict_crc = strict_crc, .entries = metadata.entries, .outcomes = outcomes };
+	for (ctxs, 0..) |*ctx, w| {
+		const base = w * 2 * verify_stream_buffer_size;
+		ctx.* = .{
+			.shared = &shared,
+			.in_buf = buffers[base..][0..verify_stream_buffer_size],
+			.out_buf = buffers[base + verify_stream_buffer_size ..][0..verify_stream_buffer_size],
+		};
+	}
+	// Worker 0 runs on this thread, so progress never depends on spawning.
+	var spawned: usize = 0;
+	for (ctxs[1..]) |*ctx| {
+		threads[spawned] = std.Thread.spawn(.{ .stack_size = verify_worker_stack_size }, runVerifyWorker, .{ctx}) catch break;
+		spawned += 1;
+	}
+	runVerifyWorker(&ctxs[0]);
+	for (threads[0..spawned]) |t| t.join();
+
+	var total: u64 = 0;
+	for (outcomes) |o| {
+		if (o.err) |err| {
+			pos.* = o.pos;
+			return err;
+		}
+		total += o.bytes;
+	}
 	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total };
 }
 
