@@ -43,64 +43,85 @@ const SpinMutex = struct {
 };
 
 /// MSB-first bit reader over any byte source exposing `next() !?u8` (null at
-/// end). Bytes are fetched lazily, so `byte_index` always equals the count of
-/// bytes the source has handed out (plus none in flight) and truncation is
-/// detected exactly where the slice-based reader detected it.
+/// end), buffering up to 64 bits so Huffman decoding can peek several bits at
+/// once. Prefetching never changes observable behavior: `Truncated` is raised
+/// only when a bit is needed and the source is exhausted, `byteOffset` counts
+/// whole consumed bytes, and `prefetchedBytes` reports fetched-but-untouched
+/// bytes so callers can recover the lazy reader's input position.
 fn BitReader(comptime Source: type) type {
 	return struct {
 		const Self = @This();
 
 		source: *Source,
-		byte_index: usize = 0,
-		bit_index: u8 = 0,
-		cur: u8 = 0,
+		/// Unconsumed bits, left-aligned (next bit is bit 63).
+		acc: u64 = 0,
+		count: u7 = 0,
+		fetched: usize = 0,
+		exhausted: bool = false,
 
-		fn fetch(self: *Self) !u8 {
-			return (try self.source.next()) orelse Error.Truncated;
+		fn refill(self: *Self) !void {
+			while (self.count <= 56 and !self.exhausted) {
+				const b = (try self.source.next()) orelse {
+					self.exhausted = true;
+					return;
+				};
+				self.acc |= @as(u64, b) << @intCast(56 - @as(u7, self.count));
+				self.count += 8;
+				self.fetched += 1;
+			}
 		}
 
-		fn readByteAligned(self: *Self) !u8 {
-			if (self.bit_index != 0) return Error.InvalidCodebook;
-			const b = try self.fetch();
-			self.byte_index += 1;
-			return b;
+		inline fn consume(self: *Self, n: u7) void {
+			self.acc = if (n == 64) 0 else self.acc << @intCast(n);
+			self.count -= n;
+		}
+
+		/// Returns the next `n` bits without consuming them, or null if fewer
+		/// than `n` bits remain before the end of input.
+		inline fn peek(self: *Self, comptime n: u7) !?u32 {
+			if (self.count < n) try self.refill();
+			if (self.count < n) return null;
+			return @intCast(self.acc >> (64 - n));
 		}
 
 		fn readBit(self: *Self) !u1 {
-			if (self.bit_index == 0) self.cur = try self.fetch();
-			const shift: u3 = @intCast(7 - self.bit_index);
-			const bit: u1 = @intCast((self.cur >> shift) & 1);
-			self.bit_index += 1;
-			if (self.bit_index == 8) {
-				self.bit_index = 0;
-				self.byte_index += 1;
-			}
+			if (self.count == 0) try self.refill();
+			if (self.count == 0) return Error.Truncated;
+			const bit: u1 = @intCast(self.acc >> 63);
+			self.consume(1);
 			return bit;
 		}
 
-		fn readBits(self: *Self, n: usize) !u32 {
-			var out: u32 = 0;
-			for (0..n) |_| {
-				out = (out << 1) | @as(u32, try self.readBit());
+		fn readBits(self: *Self, comptime n: u7) !u32 {
+			if (try self.peek(n)) |v| {
+				self.consume(n);
+				return v;
 			}
+			var out: u32 = 0;
+			for (0..n) |_| out = (out << 1) | @as(u32, try self.readBit());
 			return out;
 		}
 
+		fn readByteAligned(self: *Self) !u8 {
+			if (self.count % 8 != 0) return Error.InvalidCodebook;
+			return @intCast(try self.readBits(8));
+		}
+
 		fn alignToByte(self: *Self) void {
-			if (self.bit_index != 0) {
-				self.bit_index = 0;
-				self.byte_index += 1;
-			}
+			self.consume(self.count % 8);
 		}
 
 		fn byteOffset(self: *const Self) usize {
-			return self.byte_index;
+			return (self.fetched * 8 - self.count) / 8;
 		}
 
-		fn skipBytes(self: *Self, count: usize) !void {
-			if (self.bit_index != 0) return Error.InvalidCodebook;
-			for (0..count) |_| _ = try self.fetch();
-			self.byte_index += count;
+		fn prefetchedBytes(self: *const Self) usize {
+			return self.count / 8;
+		}
+
+		fn skipBytes(self: *Self, n: usize) !void {
+			if (self.count % 8 != 0) return Error.InvalidCodebook;
+			for (0..n) |_| _ = try self.readBits(8);
 		}
 	};
 }
@@ -122,6 +143,42 @@ fn CodebookDecoder(comptime symbol_count: usize) type {
 		};
 
 		nodes: [max_nodes]TreeNode = [_]TreeNode{.{}} ** max_nodes,
+		/// Lookup table over the next `lookup_bits` input bits, derived from
+		/// `nodes` by `buildTable`; see `decodeSymbol`.
+		table: [1 << lookup_bits]u32 = undefined,
+
+		const lookup_bits: u7 = 10;
+		const kind_leaf: u32 = 0;
+		const kind_invalid: u32 = 1;
+		const kind_node: u32 = 2;
+
+		inline fn pack(kind: u32, len: u32, value: u32) u32 {
+			return kind | (len << 2) | (value << 8);
+		}
+
+		/// Replays the bit-by-bit tree walk for every `lookup_bits`-bit prefix,
+		/// recording the symbol and code length, an invalid-code outcome after
+		/// the exact number of bits the walk would consume, or the interior
+		/// node to continue from for codes longer than the table.
+		fn buildTable(self: *Self) void {
+			for (0..self.table.len) |prefix| {
+				var node: usize = 0;
+				var depth: u32 = 0;
+				self.table[prefix] = while (true) {
+					const nd = self.nodes[node];
+					if (nd.is_leaf) {
+						if (nd.symbol < 0 or nd.symbol >= symbol_count) break pack(kind_invalid, depth, 0);
+						break pack(kind_leaf, depth, @intCast(nd.symbol));
+					}
+					if (depth == lookup_bits) break pack(kind_node, depth, @intCast(node));
+					const bit = (prefix >> @intCast(lookup_bits - 1 - depth)) & 1;
+					const next_idx = if (bit == 0) nd.left else nd.right;
+					depth += 1;
+					if (next_idx < 0 or next_idx >= max_nodes) break pack(kind_invalid, depth, 0);
+					node = @intCast(next_idx);
+				};
+			}
+		}
 
 		fn reset(self: *Self) void {
 			@memset(self.nodes[0..], .{});
@@ -201,10 +258,32 @@ fn CodebookDecoder(comptime symbol_count: usize) type {
 			self.nodes[0].right = next + 2;
 			self.nodes[0].left = next + 1;
 			self.nodes[0].is_leaf = false;
+			self.buildTable();
 		}
 
+		/// Table-driven Huffman decode: one lookup resolves codes of up to
+		/// `lookup_bits` bits; longer codes and the last few bits of input fall
+		/// back to the bit-by-bit tree walk, so errors and consumed bits match.
 		fn decodeSymbol(self: *const Self, bits: anytype) !u16 {
 			var node_idx: usize = 0;
+			if (try bits.peek(lookup_bits)) |prefix| {
+				const e = self.table[prefix];
+				const len: u7 = @intCast((e >> 2) & 0x3F);
+				switch (e & 3) {
+					kind_leaf => {
+						bits.consume(len);
+						return @intCast(e >> 8);
+					},
+					kind_invalid => {
+						bits.consume(len);
+						return Error.InvalidHuffmanCode;
+					},
+					else => {
+						bits.consume(len);
+						node_idx = e >> 8;
+					},
+				}
+			}
 			while (true) {
 				const node = self.nodes[node_idx];
 				if (node.is_leaf) {
@@ -1297,20 +1376,23 @@ pub fn decode(allocator: std.mem.Allocator, compressed: []const u8, expected_len
 
 	var source = byte_io.SliceSource{ .bytes = compressed };
 	var sink = byte_io.SliceSink{ .out = out };
-	try decodeStream(&source, &sink, expected_len);
+	try decodeStream(&source, &sink, expected_len, null);
 	return out;
 }
 
 /// Streaming LZH+RLE decode: pulls compressed bytes from `source.next()` and
 /// pushes exactly `expected_len` decoded bytes to `sink.put`. Working memory is
 /// the fixed 8 KiB LZ window plus Huffman tables, independent of fork size.
-pub fn decodeStream(source: anytype, sink: anytype, expected_len: usize) !void {
+pub fn decodeStream(source: anytype, sink: anytype, expected_len: usize, prefetched: ?*usize) !void {
 	const Source = @typeInfo(@TypeOf(source)).pointer.child;
 	const Sink = @typeInfo(@TypeOf(sink)).pointer.child;
 	var decoder = Decoder(Source, Sink){
 		.bits = .{ .source = source },
 		.sink = sink,
 		.expected_len = expected_len,
+	};
+	errdefer if (prefetched) |p| {
+		p.* = decoder.bits.prefetchedBytes();
 	};
 	try decoder.decodeAll();
 	if (decoder.out_index != expected_len) return Error.OutputLengthMismatch;

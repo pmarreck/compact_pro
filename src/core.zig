@@ -559,9 +559,11 @@ fn streamFork(
 	const end = start + compressed_len;
 	if (end > source.size) return Error.OffsetOutOfRange;
 	var cursor = RangeCursor.init(source, in_buf, start, end);
-	errdefer pos.* = cursor.pos;
+	// The LZH bit reader prefetches; report the lazy (consumed) position.
+	var prefetched: usize = 0;
+	errdefer pos.* = cursor.pos - prefetched;
 	if (lzh_enabled) {
-		try lzh.decodeStream(&cursor, sink, uncompressed_len);
+		try lzh.decodeStream(&cursor, sink, uncompressed_len, &prefetched);
 	} else {
 		try rle8182.decodeStream(&cursor, sink, uncompressed_len, true);
 	}

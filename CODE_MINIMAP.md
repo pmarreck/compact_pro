@@ -30,6 +30,7 @@
 - `src/lzh.zig`
   - Pure Compact Pro LZH codec with per-block Huffman codebook parsing/writing, LZSS window copy/match finding, and integrated Compact Pro RLE decode stage.
   - Decoder (`decodeStream`) is generic over byte source/sink with a fixed 8 KiB window, shared by buffered extraction and streaming verification.
+  - Decode reads bits through a 64-bit buffered `BitReader` and resolves Huffman codes with a 10-bit lookup table per codebook (`CodebookDecoder.buildTable`), falling back to the tree walk for longer codes or the last bits of input; truncation points and reported offsets match bit-at-a-time decoding.
   - Supports extraction of LZH-compressed forks from legacy archives and creation of LZH-over-RLE fork payloads for new archives.
   - Encoder match finder now prefilters chain candidates using current best-match boundary bytes to reduce needless byte-by-byte scans on large multi-block inputs.
   - Encode path now supports concurrent block emission: sequential tokenization preserves dictionary semantics, while block Huffman/bitstream encoding runs in parallel with deterministic ordered merge (`encodeWithWorkerLimit`; `encode` auto-selects worker count).
