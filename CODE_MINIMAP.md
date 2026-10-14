@@ -47,6 +47,7 @@
   - Adds archive-create progress callback plumbing that reports encode work units (RLE + LZH stages) for CLI progress/ETA rendering without introducing I/O into core.
   - `verifyStream` verifies an archive in bounded memory from a caller range-read callback (`RangeSource`), streaming decoded forks to an optional `ForkSink`; header walking (`parseHeader`) is shared with `parseMetadata`.
   - Data fork offsets are overflow-checked (`dataForkOffset`).
+  - `VerifyDiagnostics.error_offset` reports where a verification failure was detected (consumed position, or CRC-covered region start).
   - Progress accumulator is mutex-protected so callback dispatch remains safe when LZH block encoding runs concurrently.
 
 - `src/ffi.zig`

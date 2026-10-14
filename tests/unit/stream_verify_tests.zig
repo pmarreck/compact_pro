@@ -144,7 +144,7 @@ fn bufferedOutcome(archive: []const u8) Outcome {
 
 fn streamOutcome(archive: []const u8, max_chunk: usize) Outcome {
 	var src = MemorySource{ .bytes = archive, .max_chunk = max_chunk };
-	_ = core.verifyStream(allocator(), src.source(), true, null) catch |e| return .{ .err = e };
+	_ = core.verifyStream(allocator(), src.source(), true, null, null) catch |e| return .{ .err = e };
 	return .ok;
 }
 
@@ -179,7 +179,7 @@ fn expectSinkMatchesExtract(archive: []const u8, max_chunk: usize) !void {
 	var src = MemorySource{ .bytes = archive, .max_chunk = max_chunk };
 	var collect = CollectSink{ .gpa = allocator() };
 	defer collect.deinit();
-	const summary = try core.verifyStream(allocator(), src.source(), true, collect.sink());
+	const summary = try core.verifyStream(allocator(), src.source(), true, collect.sink(), null);
 
 	try std.testing.expectEqual(extracted.entries.len, summary.entry_count);
 	var total: u64 = 0;
@@ -262,7 +262,7 @@ test "verifyStream reports encrypted entries like extractAll" {
 	// Header CRC now mismatches, so compare non-strict outcomes.
 	try std.testing.expectError(error.UnsupportedEncryptedEntry, core.extractAll(allocator(), archive, false));
 	var src = MemorySource{ .bytes = archive };
-	try std.testing.expectError(error.UnsupportedEncryptedEntry, core.verifyStream(allocator(), src.source(), false, null));
+	try std.testing.expectError(error.UnsupportedEncryptedEntry, core.verifyStream(allocator(), src.source(), false, null, null));
 }
 
 test "verifyStream propagates read failures and sink aborts" {
@@ -270,12 +270,12 @@ test "verifyStream propagates read failures and sink aborts" {
 	defer allocator().free(archive);
 
 	var failing = MemorySource{ .bytes = archive, .fail_at_or_after = 20 };
-	try std.testing.expectError(error.ReadFailed, core.verifyStream(allocator(), failing.source(), true, null));
+	try std.testing.expectError(error.ReadFailed, core.verifyStream(allocator(), failing.source(), true, null, null));
 
 	var src = MemorySource{ .bytes = archive };
 	var collect = CollectSink{ .gpa = allocator(), .abort_after_bytes = 4 };
 	defer collect.deinit();
-	try std.testing.expectError(error.SinkAborted, core.verifyStream(allocator(), src.source(), true, collect.sink()));
+	try std.testing.expectError(error.SinkAborted, core.verifyStream(allocator(), src.source(), true, collect.sink(), null));
 }
 
 test "verifyStream peak memory stays bounded while extractAll grows with fork size" {
@@ -292,7 +292,7 @@ test "verifyStream peak memory stays bounded while extractAll grows with fork si
 
 	var stream_peak = PeakAllocator{ .child = allocator() };
 	var src = MemorySource{ .bytes = archive };
-	const summary = try core.verifyStream(stream_peak.allocator(), src.source(), true, null);
+	const summary = try core.verifyStream(stream_peak.allocator(), src.source(), true, null, null);
 	try std.testing.expectEqual(@as(u64, fork_len), summary.total_uncompressed);
 
 	var buffered_peak = PeakAllocator{ .child = allocator() };
@@ -318,5 +318,63 @@ test "data fork offset overflow is OffsetOutOfRange on both paths (regression)" 
 	std.mem.writeInt(u32, archive[lens + 8 ..][0..4], 0x20, .big); // resource_compressed_len
 	try std.testing.expectError(error.OffsetOutOfRange, core.extractAll(allocator(), archive, false));
 	var src = MemorySource{ .bytes = archive };
-	try std.testing.expectError(error.OffsetOutOfRange, core.verifyStream(allocator(), src.source(), false, null));
+	try std.testing.expectError(error.OffsetOutOfRange, core.verifyStream(allocator(), src.source(), false, null, null));
+}
+
+fn lzhArchive(gpa: std.mem.Allocator) !struct { bytes: []u8, fork_at: usize, header_at: usize } {
+	var text: [4000]u8 = undefined;
+	for (&text, 0..) |*b, i| b.* = "lzh wins on repetitive text. "[i % 29];
+	const entries = [_]core.EntryInput{.{ .name = "t", .data = &text, .resource = &.{} }};
+	const bytes = try core.createArchive(gpa, &entries, "");
+	const meta = try core.parseMetadata(gpa, bytes, true);
+	defer meta.deinit(gpa);
+	try std.testing.expect((meta.entries[0].flags & core.flag_lzh_data) != 0);
+	return .{
+		.bytes = bytes,
+		.fork_at = meta.entries[0].fork_data_offset,
+		.header_at = std.mem.readInt(u32, bytes[4..8], .big),
+	};
+}
+
+fn expectVerifyFailureAt(archive: []const u8, want: anyerror, offset: u64) !void {
+	var src = MemorySource{ .bytes = archive, .max_chunk = 5 };
+	var diag = core.VerifyDiagnostics{};
+	try std.testing.expectError(want, core.verifyStream(allocator(), src.source(), true, null, &diag));
+	try std.testing.expectEqual(@as(?u64, offset), diag.error_offset);
+}
+
+test "verifyStream types LZH codebook errors and reports the archive offset" {
+	const a = try lzhArchive(allocator());
+	defer allocator().free(a.bytes);
+	a.bytes[a.fork_at] = 0xFF; // literal codebook claims 255 length bytes (max 128)
+	try std.testing.expectError(error.InvalidCodebook, core.extractAll(allocator(), a.bytes, true));
+	try expectVerifyFailureAt(a.bytes, error.InvalidCodebook, a.fork_at + 1);
+}
+
+test "verifyStream types invalid Huffman codes and reports the archive offset" {
+	const a = try lzhArchive(allocator());
+	defer allocator().free(a.bytes);
+	// Each codebook gives symbol 0 a 1-bit code and leaves code `1` unassigned;
+	// the first token bit (1 = literal) then literal bit `1` is that hole.
+	@memcpy(a.bytes[a.fork_at..][0..7], &[_]u8{ 0x01, 0x10, 0x01, 0x10, 0x01, 0x10, 0xC0 });
+	try std.testing.expectError(error.InvalidHuffmanCode, core.extractAll(allocator(), a.bytes, true));
+	try expectVerifyFailureAt(a.bytes, error.InvalidHuffmanCode, a.fork_at + 7);
+}
+
+test "verifyStream reports file and header CRC failure offsets and none on success" {
+	const a = try lzhArchive(allocator());
+	defer allocator().free(a.bytes);
+
+	var src = MemorySource{ .bytes = a.bytes };
+	var diag = core.VerifyDiagnostics{};
+	_ = try core.verifyStream(allocator(), src.source(), true, null, &diag);
+	try std.testing.expectEqual(@as(?u64, null), diag.error_offset);
+
+	const file_crc_at = a.header_at + 4 + 2 + 1 + 1 + 1 + 21 + 2; // "t" record's file CRC
+	a.bytes[file_crc_at] ^= 0x01;
+	try expectVerifyFailureAt(a.bytes, error.HeaderCrcMismatch, a.header_at);
+	// Repair the header CRC so the file CRC check is what fails.
+	const covered = a.bytes[a.header_at + 4 .. a.header_at + 4 + 2 + 1 + 1 + 1 + 21 + 2 + 4 + 2 + 16];
+	std.mem.writeInt(u32, a.bytes[a.header_at..][0..4], ~std.hash.Crc32.hash(covered), .big);
+	try expectVerifyFailureAt(a.bytes, error.FileCrcMismatch, a.fork_at);
 }

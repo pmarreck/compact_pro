@@ -112,6 +112,14 @@ pub const ForkSink = struct {
 	writeFn: *const fn (ctx: ?*anyopaque, entry_index: usize, fork: ForkKind, bytes: []const u8) SinkError!void,
 };
 
+/// Where `verifyStream` detected a failure, for typed findings with offsets.
+/// `error_offset` is the archive offset just past the last byte consumed when
+/// the error was raised; for a header or file CRC mismatch it is the start of
+/// the CRC-covered region (header offset, or the entry's fork data offset).
+pub const VerifyDiagnostics = struct {
+	error_offset: ?u64 = null,
+};
+
 pub const VerifySummary = struct {
 	entry_count: usize,
 	total_uncompressed: u64,
@@ -537,6 +545,7 @@ const VerifySink = struct {
 };
 
 fn streamFork(
+	pos: *u64,
 	source: RangeSource,
 	in_buf: []u8,
 	sink: *VerifySink,
@@ -550,6 +559,7 @@ fn streamFork(
 	const end = start + compressed_len;
 	if (end > source.size) return Error.OffsetOutOfRange;
 	var cursor = RangeCursor.init(source, in_buf, start, end);
+	errdefer pos.* = cursor.pos;
 	if (lzh_enabled) {
 		try lzh.decodeStream(&cursor, sink, uncompressed_len);
 	} else {
@@ -563,7 +573,38 @@ fn streamFork(
 /// same RLE/LZH decoders as `extractAll`, checks header and per-file CRCs, and
 /// streams decoded bytes to an optional sink instead of retaining them.
 /// Returns the same errors as `extractAll` for the same archive bytes.
-pub fn verifyStream(allocator: std.mem.Allocator, source: RangeSource, strict_crc: bool, sink: ?ForkSink) Error!VerifySummary {
+fn readPreamble(cursor: *RangeCursor, size: u64) Error!u32 {
+	var preamble = StreamReader{ .cursor = cursor };
+	if (try preamble.readU8() != 0x01) return Error.InvalidMarker;
+	_ = try preamble.readU8();
+	_ = try preamble.readU16();
+	const header_offset = try preamble.readU32();
+	if (header_offset >= size) return Error.InvalidHeaderOffset;
+	return header_offset;
+}
+
+pub fn verifyStream(
+	allocator: std.mem.Allocator,
+	source: RangeSource,
+	strict_crc: bool,
+	sink: ?ForkSink,
+	diag: ?*VerifyDiagnostics,
+) Error!VerifySummary {
+	var pos: u64 = 0;
+	if (diag) |d| d.error_offset = null;
+	return verifyStreamTracked(allocator, source, strict_crc, sink, &pos) catch |err| {
+		if (diag) |d| d.error_offset = pos;
+		return err;
+	};
+}
+
+fn verifyStreamTracked(
+	allocator: std.mem.Allocator,
+	source: RangeSource,
+	strict_crc: bool,
+	sink: ?ForkSink,
+	pos: *u64,
+) Error!VerifySummary {
 	const in_buf = try allocator.alloc(u8, verify_stream_buffer_size);
 	defer allocator.free(in_buf);
 	const out_buf = try allocator.alloc(u8, verify_stream_buffer_size);
@@ -571,20 +612,22 @@ pub fn verifyStream(allocator: std.mem.Allocator, source: RangeSource, strict_cr
 
 	if (source.size < 8) return Error.Truncated;
 	var preamble_cursor = RangeCursor.init(source, in_buf, 0, 8);
-	var preamble = StreamReader{ .cursor = &preamble_cursor };
-	if (try preamble.readU8() != 0x01) return Error.InvalidMarker;
-	_ = try preamble.readU8();
-	_ = try preamble.readU16();
-	const header_offset = try preamble.readU32();
-	if (header_offset >= source.size) return Error.InvalidHeaderOffset;
+	const header_offset = readPreamble(&preamble_cursor, source.size) catch |err| {
+		pos.* = preamble_cursor.pos;
+		return err;
+	};
 
 	var header_cursor = RangeCursor.init(source, in_buf, header_offset, source.size);
 	var header = StreamReader{ .cursor = &header_cursor };
-	const metadata = try parseHeader(allocator, &header, strict_crc);
+	const metadata = parseHeader(allocator, &header, strict_crc) catch |err| {
+		pos.* = if (err == Error.HeaderCrcMismatch) header_offset else header_cursor.pos;
+		return err;
+	};
 	defer metadata.deinit(allocator);
 
 	var total: u64 = 0;
 	for (metadata.entries, 0..) |meta, index| {
+		pos.* = meta.fork_data_offset;
 		if ((meta.flags & flag_encrypted) != 0) return Error.UnsupportedEncryptedEntry;
 		const resource_exists = meta.resource_uncompressed_len > 0;
 		const data_exists = meta.data_uncompressed_len > 0 or !resource_exists;
@@ -592,15 +635,18 @@ pub fn verifyStream(allocator: std.mem.Allocator, source: RangeSource, strict_cr
 
 		if (resource_exists) {
 			out.fork = .resource;
-			try streamFork(source, in_buf, &out, meta.fork_data_offset, meta.resource_compressed_len, meta.resource_uncompressed_len, (meta.flags & flag_lzh_resource) != 0);
+			try streamFork(pos, source, in_buf, &out, meta.fork_data_offset, meta.resource_compressed_len, meta.resource_uncompressed_len, (meta.flags & flag_lzh_resource) != 0);
 		}
 		const data_offset = try dataForkOffset(meta);
 		if (data_exists) {
 			out.fork = .data;
-			try streamFork(source, in_buf, &out, data_offset, meta.data_compressed_len, meta.data_uncompressed_len, (meta.flags & flag_lzh_data) != 0);
+			try streamFork(pos, source, in_buf, &out, data_offset, meta.data_compressed_len, meta.data_uncompressed_len, (meta.flags & flag_lzh_data) != 0);
 		}
 
-		if (strict_crc and out.crc_state != meta.file_crc) return Error.FileCrcMismatch;
+		if (strict_crc and out.crc_state != meta.file_crc) {
+			pos.* = meta.fork_data_offset;
+			return Error.FileCrcMismatch;
+		}
 		if (resource_exists) total += meta.resource_uncompressed_len;
 		if (data_exists) total += meta.data_uncompressed_len;
 	}

@@ -3366,7 +3366,11 @@ static int cmd_verify(int argc, char **argv) {
 	if (in.file != NULL) fclose(in.file);
 	free(stdin_bytes);
 	if (rc != CP_OK) {
-		fprintf(stderr, "error: verify failed: %s\n", cp_error_string(rc));
+		if (summary.error_offset != CP_NO_ERROR_OFFSET) {
+			fprintf(stderr, "error: verify failed: %s (archive offset %llu)\n", cp_error_string(rc), (unsigned long long)summary.error_offset);
+		} else {
+			fprintf(stderr, "error: verify failed: %s\n", cp_error_string(rc));
+		}
 		return 1;
 	}
 	printf("ok\tentries=%zu\tbytes=%llu\n", summary.entry_count, (unsigned long long)summary.total_uncompressed);

@@ -27,6 +27,8 @@ enum {
 	CP_ERR_UNEXPECTED_END_OF_STREAM = 15,
 	CP_ERR_READ_FAILED = 16,
 	CP_ERR_SINK_ABORTED = 17,
+	CP_ERR_LZH_INVALID_CODEBOOK = 18,
+	CP_ERR_LZH_INVALID_HUFFMAN_CODE = 19,
 	CP_ERR_OUT_OF_MEMORY = 100,
 	CP_ERR_UNKNOWN = 255
 };
@@ -149,9 +151,15 @@ typedef struct {
 	uint64_t size;
 } cp_range_source;
 
+/* On failure, error_offset is the archive offset just past the last byte
+ * consumed when the error was raised (for a header or file CRC mismatch, the
+ * start of the covered region). It is CP_NO_ERROR_OFFSET when unknown or on
+ * success. */
+#define CP_NO_ERROR_OFFSET UINT64_MAX
 typedef struct {
 	size_t entry_count;
 	uint64_t total_uncompressed;
+	uint64_t error_offset;
 } cp_verify_summary;
 
 /* Bounded-memory verification: reads the archive through `source`, decodes

@@ -255,3 +255,17 @@ expand_bad_rc=0
 verify_bad_rc=0
 "./zig-out/bin/compact-pro" verify "$tmp_dir/bad-trailer.cpt" >/dev/null 2>"$tmp_dir/verify-bad-trailer.err" || verify_bad_rc=$?
 [[ "$verify_bad_rc" == 1 ]]
+
+# LZH bitstream damage gets a typed error and the archive offset where it was found.
+awk 'BEGIN{for(i=0;i<4000;i++) printf "%s", substr("lzh wins on repetitive text. ", i % 29 + 1, 1)}' >"$tmp_dir/lzh-text.txt"
+"./zig-out/bin/compact-pro" compress --no-progress -o "$tmp_dir/lzh-text.cpt" "$tmp_dir/lzh-text.txt" 2>/dev/null
+[[ "$("./zig-out/bin/compact-pro" list "$tmp_dir/lzh-text.cpt" | head -1)" == *"flags=0x0004"* ]]
+# The directory header precedes fork data; read the entry's fork_data_offset
+# (after crc, count, comment length, name length byte, 12-byte name, volume).
+lzh_header_at=$(od -An -tu4 --endian=big -j4 -N4 "$tmp_dir/lzh-text.cpt" | tr -d ' ')
+lzh_fork_at=$(od -An -tu4 --endian=big -j $((lzh_header_at + 4 + 2 + 1 + 1 + 12 + 1)) -N4 "$tmp_dir/lzh-text.cpt" | tr -d ' ')
+printf '\xff' | dd of="$tmp_dir/lzh-text.cpt" bs=1 seek="$lzh_fork_at" conv=notrunc status=none
+lzh_rc=0
+"./zig-out/bin/compact-pro" verify "$tmp_dir/lzh-text.cpt" >/dev/null 2>"$tmp_dir/lzh-verify.err" || lzh_rc=$?
+[[ "$lzh_rc" == 1 ]]
+[[ "$(head -1 "$tmp_dir/lzh-verify.err")" == "error: verify failed: invalid lzh codebook (archive offset $((lzh_fork_at + 1)))" ]]

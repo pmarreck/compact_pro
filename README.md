@@ -109,7 +109,8 @@ Usage:
 - `verify`
   - Checks archive integrity (header CRC, every fork's decoding, per-file CRC) without extracting anything or loading the archive into memory.
   - Uses the bounded-memory `cp_archive_verify_stream` C API, which reads the archive through a range-read callback and returns the same error codes as `cp_archive_extract`.
-  - Prints `ok<TAB>entries=N<TAB>bytes=M` on success; on failure prints `error: verify failed: <reason>` to stderr and exits 1.
+  - Prints `ok<TAB>entries=N<TAB>bytes=M` on success; on failure prints `error: verify failed: <reason> (archive offset N)` to stderr and exits 1. The offset is where the failure was detected: just past the last byte consumed, or the start of the CRC-covered region for header and file CRC mismatches.
+  - LZH bitstream damage is reported as `invalid lzh codebook` or `invalid lzh huffman code` (C codes `CP_ERR_LZH_INVALID_CODEBOOK`, `CP_ERR_LZH_INVALID_HUFFMAN_CODE`).
   - `-` or `@stdin` reads the archive from stdin (buffered in memory, since stdin is not seekable).
 
 ## Resource Fork Policy

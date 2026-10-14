@@ -6,6 +6,7 @@
 - [x] `verify` must reject everything old `expand` rejects (superset), including metadata-trailer damage; any gap blocks commit. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
 - [x] Golden oracle: seeded `randomz` corpus compressed and expanded by pre-rework `220ca5d` and by the reworked build must match byte-for-byte, and `verify` must accept every archive. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
 - [x] Corruption differential: mutate oracle archives with `corruption_reader` profiles; old and new `expand` outcomes must match exactly and crashes/timeouts are reported separately. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
+- [x] Give LZH bitstream errors (bad codebook, bad Huffman code) their own C error codes and report the archive byte offset of any verify failure (validate request 2026-10-14). (done 2026-10-14 18:20 EDT)
 - [ ] Add a CRC to the metadata trailer (new trailer version; old versions stay readable) so `verify` and `expand` detect trailer damage, which 307 of 2540 corruption cases showed is currently invisible.
 - [ ] Investigate whether bytes after the Compact Pro header end, with no valid trailer, should be reported (115 truncations removing only the trailer footer pass today); needs real-archive evidence before any verdict.
 - [ ] Decode speed pass after the verifier lands: profile first, then table/carry-less-multiply CRC-32, table-driven Huffman decode, and SIMD where the profile shows a win; golden oracle must stay byte-identical.

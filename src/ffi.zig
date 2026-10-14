@@ -80,6 +80,8 @@ const cp_err_output_length_mismatch = 14;
 const cp_err_unexpected_end_of_stream = 15;
 const cp_err_read_failed = 16;
 const cp_err_sink_aborted = 17;
+const cp_err_lzh_invalid_codebook = 18;
+const cp_err_lzh_invalid_huffman_code = 19;
 const cp_err_out_of_memory = 100;
 const cp_err_unknown = 255;
 
@@ -102,6 +104,8 @@ fn mapError(err: anyerror) c_int {
 		error.UnexpectedEndOfStream => cp_err_unexpected_end_of_stream,
 		error.ReadFailed => cp_err_read_failed,
 		error.SinkAborted => cp_err_sink_aborted,
+		error.InvalidCodebook => cp_err_lzh_invalid_codebook,
+		error.InvalidHuffmanCode => cp_err_lzh_invalid_huffman_code,
 		error.OutOfMemory => cp_err_out_of_memory,
 		else => cp_err_unknown,
 	};
@@ -317,7 +321,10 @@ pub const CpRangeSource = extern struct {
 pub const CpVerifySummary = extern struct {
 	entry_count: usize,
 	total_uncompressed: u64,
+	error_offset: u64,
 };
+
+const no_error_offset = std.math.maxInt(u64);
 
 /// Adapts the C range-read and fork-sink callbacks to core.RangeSource and
 /// core.ForkSink for the bounded-memory streaming verifier.
@@ -346,15 +353,19 @@ pub export fn cp_archive_verify_stream(
 	sink_ctx: ?*anyopaque,
 	out_summary: ?*CpVerifySummary,
 ) c_int {
-	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0 };
+	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0, .error_offset = no_error_offset };
 	const src = source orelse return cp_err_invalid_argument;
 	if (src.read_at == null) return cp_err_invalid_argument;
 
 	var bridge = StreamBridge{ .source = src.*, .sink = sink, .sink_ctx = sink_ctx };
 	const range = core.RangeSource{ .ctx = &bridge, .size = src.size, .readAtFn = StreamBridge.readAt };
 	const fork_sink: ?core.ForkSink = if (sink != null) .{ .ctx = &bridge, .writeFn = StreamBridge.write } else null;
-	const summary = core.verifyStream(allocator, range, strict_crc != 0, fork_sink) catch |err| return mapError(err);
-	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed };
+	var diag = core.VerifyDiagnostics{};
+	const summary = core.verifyStream(allocator, range, strict_crc != 0, fork_sink, &diag) catch |err| {
+		if (out_summary) |s| s.error_offset = diag.error_offset orelse no_error_offset;
+		return mapError(err);
+	};
+	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed, .error_offset = no_error_offset };
 	return cp_ok;
 }
 
@@ -412,6 +423,8 @@ pub export fn cp_error_string(code: c_int) [*:0]const u8 {
 		cp_err_unexpected_end_of_stream => "unexpected end of stream",
 		cp_err_read_failed => "read failed",
 		cp_err_sink_aborted => "sink aborted",
+		cp_err_lzh_invalid_codebook => "invalid lzh codebook",
+		cp_err_lzh_invalid_huffman_code => "invalid lzh huffman code",
 		cp_err_out_of_memory => "out of memory",
 		else => "unknown error",
 	};
