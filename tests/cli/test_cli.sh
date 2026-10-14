@@ -224,3 +224,34 @@ if command -v unar >/dev/null 2>&1; then
 	unar -force-overwrite -output-directory "$tmp_dir/out-unar" "$tmp_dir/unar-multiblock.cpt" >"$tmp_dir/unar-multiblock.out" 2>"$tmp_dir/unar-multiblock.err"
 	cmp "$tmp_dir/unar-multiblock.txt" "$tmp_dir/out-unar/unar-multiblock.txt"
 fi
+
+# verify: bounded-memory integrity check through cp_archive_verify_stream.
+verify_out="$("./zig-out/bin/compact-pro" verify "$tmp_dir/a.cpt")"
+list_entries="$("./zig-out/bin/compact-pro" list "$tmp_dir/a.cpt" | grep -vc '^trailer_size=')"
+list_bytes="$("./zig-out/bin/compact-pro" list "$tmp_dir/a.cpt" | awk -F'\t' '/\tdata=/ { sub("data=", "", $2); sub("rsrc=", "", $3); t += $2 + $3 } END { print t + 0 }')"
+[[ "$verify_out" == $'ok\tentries='"$list_entries"$'\tbytes='"$list_bytes" ]]
+verify_stdin="$("./zig-out/bin/compact-pro" verify - <"$tmp_dir/a.cpt")"
+[[ "$verify_stdin" == "$verify_out" ]]
+cp "$tmp_dir/a.cpt" "$tmp_dir/verify space.cpt"
+[[ "$("./zig-out/bin/compact-pro" verify "$tmp_dir/verify space.cpt")" == "$verify_out" ]]
+cp "$tmp_dir/a.cpt" "$tmp_dir/corrupt.cpt"
+first_fork_byte="$(xxd -p -l 1 -s 8 "$tmp_dir/corrupt.cpt")"
+printf "$(printf '\\x%02x' $(( 0x$first_fork_byte ^ 0xFF )))" | dd of="$tmp_dir/corrupt.cpt" bs=1 seek=8 conv=notrunc status=none
+verify_rc=0
+"./zig-out/bin/compact-pro" verify "$tmp_dir/corrupt.cpt" >"$tmp_dir/verify-corrupt.out" 2>"$tmp_dir/verify-corrupt.err" || verify_rc=$?
+[[ "$verify_rc" == 1 ]]
+[[ ! -s "$tmp_dir/verify-corrupt.out" ]]
+[[ "$(cat "$tmp_dir/verify-corrupt.err")" == "error: verify failed: "* ]]
+
+# verify must reject whatever expand rejects, including a damaged metadata
+# trailer: claim the whole file as trailer payload so the archive proper is empty.
+cp "$tmp_dir/a.cpt" "$tmp_dir/bad-trailer.cpt"
+bad_len=$(( $(stat -c %s "$tmp_dir/bad-trailer.cpt") - 16 ))
+printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((bad_len & 255)) $(((bad_len >> 8) & 255)) $(((bad_len >> 16) & 255)) $(((bad_len >> 24) & 255)))" |
+	dd of="$tmp_dir/bad-trailer.cpt" bs=1 seek=$((bad_len + 8)) conv=notrunc status=none
+expand_bad_rc=0
+"./zig-out/bin/compact-pro" expand --no-progress "$tmp_dir/bad-trailer.cpt" -d "$tmp_dir/out-bad-trailer" >/dev/null 2>"$tmp_dir/expand-bad-trailer.err" || expand_bad_rc=$?
+[[ "$expand_bad_rc" != 0 ]]
+verify_bad_rc=0
+"./zig-out/bin/compact-pro" verify "$tmp_dir/bad-trailer.cpt" >/dev/null 2>"$tmp_dir/verify-bad-trailer.err" || verify_bad_rc=$?
+[[ "$verify_bad_rc" == 1 ]]

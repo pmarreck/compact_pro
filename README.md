@@ -52,6 +52,7 @@ Usage:
   compact-pro expand [--sidecar|--rsrc <path>|--xattr <name>] [--progress|--no-progress] <archive.cpt> [-d <outdir>] [--path <entry> ...]
   compact-pro add [--sidecar|--rsrc <path>|--xattr <name>] [--progress|--no-progress] <archive.cpt> <file...>
   compact-pro list <archive.cpt>
+  compact-pro verify <archive.cpt|->   (bounded-memory integrity check)
   compact-pro --help
 ```
 
@@ -104,6 +105,12 @@ Usage:
   - Lists archive entries and fork sizes.
   - Metadata trailer is out-of-band and never appears as a normal archive entry.
   - Prints trailer accounting line (`trailer_size`, `trailer_payload`) at the end so on-disk overhead is explicit.
+
+- `verify`
+  - Checks archive integrity (header CRC, every fork's decoding, per-file CRC) without extracting anything or loading the archive into memory.
+  - Uses the bounded-memory `cp_archive_verify_stream` C API, which reads the archive through a range-read callback and returns the same error codes as `cp_archive_extract`.
+  - Prints `ok<TAB>entries=N<TAB>bytes=M` on success; on failure prints `error: verify failed: <reason>` to stderr and exits 1.
+  - `-` or `@stdin` reads the archive from stdin (buffered in memory, since stdin is not seekable).
 
 ## Resource Fork Policy
 

@@ -1,44 +1,26 @@
 # PLAN
 
+## Next
+
+- [x] Add a bounded-memory streaming verifier C API (range-read input, decoded-byte sink) for `validate` deep checks, differential-tested against `cp_archive_extract`. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
+- [x] `verify` must reject everything old `expand` rejects (superset), including metadata-trailer damage; any gap blocks commit. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
+- [x] Golden oracle: seeded `randomz` corpus compressed and expanded by pre-rework `220ca5d` and by the reworked build must match byte-for-byte, and `verify` must accept every archive. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
+- [x] Corruption differential: mutate oracle archives with `corruption_reader` profiles; old and new `expand` outcomes must match exactly and crashes/timeouts are reported separately. (context: docs/plan_context/streaming_verifier.md) (done 2026-10-14 17:50 EDT)
+- [ ] Add a CRC to the metadata trailer (new trailer version; old versions stay readable) so `verify` and `expand` detect trailer damage, which 307 of 2540 corruption cases showed is currently invisible.
+- [ ] Investigate whether bytes after the Compact Pro header end, with no valid trailer, should be reported (115 truncations removing only the trailer footer pass today); needs real-archive evidence before any verdict.
+- [ ] Decode speed pass after the verifier lands: profile first, then table/carry-less-multiply CRC-32, table-driven Huffman decode, and SIMD where the profile shows a win; golden oracle must stay byte-identical.
+- [ ] When `./fuzz` gains real campaigns, use the 2026-09-29 mutation vocabulary (sniper, bolter, sparse shotgun, dense nuke) and record definition version plus parameters per run.
+- [ ] Keep any future verdict or severity output aligned with the shared validate verdict memory (FAIL, KNOWN_DEFECT, WARN, reach).
+
 ## Done Criteria (current milestone)
 
-- [x] Implement pure Zig core for Compact Pro archive parse/create/extract/add (RLE profile first, deterministic behavior). (completed 2026-02-20 12:00 EST)
-- [x] Provide stable C FFI over core for archive operations and memory ownership. (completed 2026-02-20 12:00 EST)
-- [x] Ship C CLI binary named `compact-pro` with `--help`, `compress`, `expand`, `add`, `list`, and resource-fork options (`--sidecar`, `--rsrc`, `--xattr`). (completed 2026-02-20 12:00 EST)
-- [x] Add selective extraction (`expand --path`) and directory-aware archive path preservation. (completed 2026-02-20 12:00 EST)
-- [x] Add cross-platform metadata extension trailer (appended out-of-band bytes) with best-effort restore + warnings on unsupported/failed metadata restore paths. (completed 2026-02-20 12:00 EST)
-- [x] Add cross-platform build/test scripts: `./build`, `./test`, plus `./bm` and `./fuzz` entrypoints. (completed 2026-02-20 12:00 EST)
-- [x] Add dependency management via `flake.nix` and Garnix + GitHub Actions CI scaffolding. (completed 2026-02-20 12:00 EST)
-- [x] Write `README.md` with CI badges (Garnix + GitHub Actions), project description, and CLI options. (completed 2026-02-20 12:00 EST)
-- [x] Create/push GitHub repo `compact_pro` via `gh` and confirm badge links resolve against the created remote. (completed 2026-02-20 12:05 EST)
-- [x] Update `CODE_MINIMAP.md` to reflect all new code/docs. (completed 2026-02-20 12:00 EST)
-- [x] Validate Windows target compatibility and fix platform-specific CLI build issues (`x86_64-windows`, `aarch64-windows`). (completed 2026-02-20 12:27 EST)
-- [x] Expand CI coverage matrix to Linux x86_64/aarch64, macOS aarch64, Windows x86_64, and Windows aarch64 cross-compile artifact job. (completed 2026-02-20 12:27 EST)
-- [x] Make `compact-pro compress` ergonomic: optional `-o`, `~` path expansion, auto `.cpt` extension, stdin input (`-`) and stdout output (`-`) support, with CLI regression tests. (completed 2026-02-20 13:09 EST)
-- [x] Implement metadata trailer v2 with hierarchical file/dir metadata, directory restore order, explicit cross-OS per-field restore warnings, and trailer-size listing output. (completed 2026-02-20 14:26 EST)
-- [x] Add CLI progress indication flags (`--progress`, `--no-progress`) for `compress`, `expand`, and `add` with CLI regression tests. (completed 2026-02-20 15:20 EST)
-- [x] Implement `./bm` benchmark suite comparing `compact-pro` vs `zip`/`gzip` for speed and compression ratio, including historical drift checks. (completed 2026-02-20 15:20 EST)
-- [x] Optimize RLE encode path to emit run opcodes for repeated non-`0x81` bytes and validate via new unit test + benchmark rerun. (completed 2026-02-20 15:24 EST)
-- [x] Add completion stats on `compress`/`expand` stderr output (MB/s + compression/expansion size reporting) with CLI regression tests. (completed 2026-02-20 15:27 EST)
-- [x] Optimize RLE decode path (preallocated output + chunked repeat fill) to reduce extraction overhead; validate via full suite + benchmark rerun. (completed 2026-02-20 15:29 EST)
-- [x] Fix CLI directory-input handling for `compress`/`add` (recursive expansion), including space-containing paths; add regression test. (completed 2026-02-20 15:36 EST)
-- [x] Implement safe output overwrite semantics for `compress`: default no-clobber with explicit `--force`/`-f`. (completed 2026-02-20 15:38 EST)
-- [x] Archive and restore empty-directory metadata via trailer records, including empty directory recreation on expand. (completed 2026-02-20 15:38 EST)
-- [x] Fix Compact Pro container count semantics in writer/parser (root and directory counts as full subtree entry totals) for legacy extractor compatibility. (completed 2026-02-20 16:31 EST)
-- [x] Fix Compact Pro header CRC coverage to include linearized entry metadata block (count/comment + all entry records) and lock with a regression unit test. (completed 2026-02-20 16:42 EST)
-- [x] Reproduce and fix RLE corruption around `0x81,0x81,0x81,0x82` sequences (seen in Fallout saves), with unit regression and `unar` validation against full Fallout archive. (completed 2026-02-20 16:51 EST)
-- [x] Remove `garnix.yaml` and move CI target selection into `flake.nix` checks (5-target matrix), plus Linux POSIX C macro fixes needed for flake cross-target builds. (completed 2026-02-20 17:02 EST)
-- [x] Optimization pass: speed up RLE encoder via literal-span batching and vectorized run-length scanning; validate with full test suite and benchmark rerun (`compact-pro` compress wall ~117.35ms -> ~111.45ms on `./bm --runs 2`). (completed 2026-02-20 17:47 EST)
-- [x] Implement LZH decode in pure Zig core (LZH+RLE pipeline) and validate against real Compact Pro fixture (`MacEnvy21.cpt`) via strict CRC + SHA-256 resource hash + CLI regression. (completed 2026-02-20 18:35 EST)
-- [x] Implement LZH encode in pure Zig core and wire archive writes to choose per-fork `RLE` vs `LZH(RLE)` by size, with metadata flag persistence and external `lsar`/`unar` verification. (completed 2026-02-20 18:46 EST)
-- [x] Reproduce and fix The Unarchiver incompatibility for generated archives by adding a `unar` multi-block regression and correcting LZH multi-block writer termination semantics (allowing block-token overshoot to reach `block_count >= 0x1fff0`). (completed 2026-02-20 20:20 EST)
-- [x] Optimization pass: speed up LZH encode match search via best-length candidate prefiltering, validate with full suite + benchmark rerun. (completed 2026-02-20 21:52 EST)
 - [x] Optimization pass: implement concurrent LZH block encoding pipeline (sequential match/token phase + parallel block Huffman/bitstream emission with ordered merge), and lock deterministic output with worker-limit regression tests. (completed 2026-02-20 23:16 EST)
 - [x] Upgrade CLI progress UX: byte-based `compress-read`, real `compress-encode` progress via core/FFI callback, progress bar rendering, and ETA output in live/non-live modes. (completed 2026-02-20 23:29 EST)
 - [x] Refine progress UX: remove low-value `compress-read` output and extend LZH encode progress callbacks across tokenization + parallel block encoding so `compress-encode` ETA remains informative during long runs. (completed 2026-02-20 23:38 EST)
 - [x] Bold optimization pass: parallelize LZH tokenization over deterministic overlap-seeded segments with global block reassembly (preserving Compact Pro block semantics) plus a multi-segment worker-determinism regression test. (completed 2026-02-21 06:58 EST)
 - [x] Fix macOS default resource-fork ingestion: avoid pulling filesystem-compression backing streams from `..namedfork/rsrc` by requiring real `com.apple.ResourceFork` xattr presence in default mode. (completed 2026-02-21 09:59 EST)
 
-## Continuity
+## Later
 
-- [x] Spec and fixture groundwork complete. (completed 2026-02-20 02:36 EST)
+- [ ] Capture and assert the CLI suite's expected stderr (metadata warnings, stats lines) so `./test` output runs clean.
+- [ ] Adopt the shared `performance_profiling` engine (`./cg`, `./mg`, external history) in place of ad-hoc benchmark comparisons.

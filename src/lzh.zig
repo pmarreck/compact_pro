@@ -1,4 +1,5 @@
 const std = @import("std");
+const byte_io = @import("byte_io.zig");
 
 pub const Error = error{
 	Truncated,
@@ -41,57 +42,68 @@ const SpinMutex = struct {
 	}
 };
 
-const BitReader = struct {
-	bytes: []const u8,
-	byte_index: usize = 0,
-	bit_index: u8 = 0,
+/// MSB-first bit reader over any byte source exposing `next() !?u8` (null at
+/// end). Bytes are fetched lazily, so `byte_index` always equals the count of
+/// bytes the source has handed out (plus none in flight) and truncation is
+/// detected exactly where the slice-based reader detected it.
+fn BitReader(comptime Source: type) type {
+	return struct {
+		const Self = @This();
 
-	fn readByteAligned(self: *BitReader) Error!u8 {
-		if (self.bit_index != 0) return Error.InvalidCodebook;
-		if (self.byte_index >= self.bytes.len) return Error.Truncated;
-		const b = self.bytes[self.byte_index];
-		self.byte_index += 1;
-		return b;
-	}
+		source: *Source,
+		byte_index: usize = 0,
+		bit_index: u8 = 0,
+		cur: u8 = 0,
 
-	fn readBit(self: *BitReader) Error!u1 {
-		if (self.byte_index >= self.bytes.len) return Error.Truncated;
-		const b = self.bytes[self.byte_index];
-		const shift: u3 = @intCast(7 - self.bit_index);
-		const bit: u1 = @intCast((b >> shift) & 1);
-		self.bit_index += 1;
-		if (self.bit_index == 8) {
-			self.bit_index = 0;
+		fn fetch(self: *Self) !u8 {
+			return (try self.source.next()) orelse Error.Truncated;
+		}
+
+		fn readByteAligned(self: *Self) !u8 {
+			if (self.bit_index != 0) return Error.InvalidCodebook;
+			const b = try self.fetch();
 			self.byte_index += 1;
+			return b;
 		}
-		return bit;
-	}
 
-	fn readBits(self: *BitReader, n: usize) Error!u32 {
-		var out: u32 = 0;
-		for (0..n) |_| {
-			out = (out << 1) | @as(u32, try self.readBit());
+		fn readBit(self: *Self) !u1 {
+			if (self.bit_index == 0) self.cur = try self.fetch();
+			const shift: u3 = @intCast(7 - self.bit_index);
+			const bit: u1 = @intCast((self.cur >> shift) & 1);
+			self.bit_index += 1;
+			if (self.bit_index == 8) {
+				self.bit_index = 0;
+				self.byte_index += 1;
+			}
+			return bit;
 		}
-		return out;
-	}
 
-	fn alignToByte(self: *BitReader) void {
-		if (self.bit_index != 0) {
-			self.bit_index = 0;
-			self.byte_index += 1;
+		fn readBits(self: *Self, n: usize) !u32 {
+			var out: u32 = 0;
+			for (0..n) |_| {
+				out = (out << 1) | @as(u32, try self.readBit());
+			}
+			return out;
 		}
-	}
 
-	fn byteOffset(self: *const BitReader) usize {
-		return self.byte_index;
-	}
+		fn alignToByte(self: *Self) void {
+			if (self.bit_index != 0) {
+				self.bit_index = 0;
+				self.byte_index += 1;
+			}
+		}
 
-	fn skipBytes(self: *BitReader, count: usize) Error!void {
-		if (self.bit_index != 0) return Error.InvalidCodebook;
-		if (self.byte_index + count > self.bytes.len) return Error.Truncated;
-		self.byte_index += count;
-	}
-};
+		fn byteOffset(self: *const Self) usize {
+			return self.byte_index;
+		}
+
+		fn skipBytes(self: *Self, count: usize) !void {
+			if (self.bit_index != 0) return Error.InvalidCodebook;
+			for (0..count) |_| _ = try self.fetch();
+			self.byte_index += count;
+		}
+	};
+}
 
 fn CodebookDecoder(comptime symbol_count: usize) type {
 	return struct {
@@ -191,7 +203,7 @@ fn CodebookDecoder(comptime symbol_count: usize) type {
 			self.nodes[0].is_leaf = false;
 		}
 
-		fn decodeSymbol(self: *const Self, bits: *BitReader) Error!u16 {
+		fn decodeSymbol(self: *const Self, bits: anytype) !u16 {
 			var node_idx: usize = 0;
 			while (true) {
 				const node = self.nodes[node_idx];
@@ -214,139 +226,147 @@ const RleState = enum {
 	esc2_seen,
 };
 
-const Decoder = struct {
-	bits: BitReader,
-	output: []u8,
-	out_index: usize = 0,
-	rle_state: RleState = .none,
-	save_char: u8 = 0,
-	lz_ptr: usize = 0,
-	lz_window: [window_size]u8 = [_]u8{0} ** window_size,
-	literal_code: CodebookDecoder(256) = .{},
-	length_code: CodebookDecoder(64) = .{},
-	offset_code: CodebookDecoder(128) = .{},
-	has_previous_block: bool = false,
-	block_start: usize = 0,
+/// Compact Pro LZH+RLE decoder, generic over a byte source (`next() !?u8`) and
+/// a byte sink (`put(u8)`), so the buffered extractor and the bounded-memory
+/// streaming verifier share one implementation. `expected_len` bounds output.
+fn Decoder(comptime Source: type, comptime Sink: type) type {
+	return struct {
+		const Self = @This();
 
-	fn emit(self: *Decoder, b: u8) Error!void {
-		if (self.out_index >= self.output.len) return Error.OutputLengthMismatch;
-		self.output[self.out_index] = b;
-		self.out_index += 1;
-	}
+		bits: BitReader(Source),
+		sink: *Sink,
+		expected_len: usize,
+		out_index: usize = 0,
+		rle_state: RleState = .none,
+		save_char: u8 = 0,
+		lz_ptr: usize = 0,
+		lz_window: [window_size]u8 = [_]u8{0} ** window_size,
+		literal_code: CodebookDecoder(256) = .{},
+		length_code: CodebookDecoder(64) = .{},
+		offset_code: CodebookDecoder(128) = .{},
+		has_previous_block: bool = false,
+		block_start: usize = 0,
 
-	fn outch(self: *Decoder, ch: u8) Error!void {
-		self.lz_window[self.lz_ptr & (window_size - 1)] = ch;
-		self.lz_ptr += 1;
+		fn emit(self: *Self, b: u8) !void {
+			if (self.out_index >= self.expected_len) return Error.OutputLengthMismatch;
+			try self.sink.put(b);
+			self.out_index += 1;
+		}
 
-		switch (self.rle_state) {
-			.none => {
-				if (ch == esc1 and (self.output.len - self.out_index) != 1) {
-					self.rle_state = .esc1_seen;
-					return;
-				}
-				self.save_char = ch;
-				try self.emit(ch);
-			},
-			.esc1_seen => {
-				if (ch == esc2) {
-					self.rle_state = .esc2_seen;
-					return;
-				}
-				self.save_char = esc1;
-				try self.emit(esc1);
-				if (self.out_index == self.output.len) return;
+		fn outch(self: *Self, ch: u8) !void {
+			self.lz_window[self.lz_ptr & (window_size - 1)] = ch;
+			self.lz_ptr += 1;
 
-				if (ch == esc1 and (self.output.len - self.out_index) != 1) {
-					return;
-				}
-
-				self.rle_state = .none;
-				self.save_char = ch;
-				try self.emit(ch);
-			},
-			.esc2_seen => {
-				self.rle_state = .none;
-				if (ch != 0) {
-					var n = ch;
-					while (n > 1) : (n -= 1) {
-						try self.emit(self.save_char);
-						if (self.out_index == self.output.len) return;
+			switch (self.rle_state) {
+				.none => {
+					if (ch == esc1 and (self.expected_len - self.out_index) != 1) {
+						self.rle_state = .esc1_seen;
+						return;
 					}
-				} else {
+					self.save_char = ch;
+					try self.emit(ch);
+				},
+				.esc1_seen => {
+					if (ch == esc2) {
+						self.rle_state = .esc2_seen;
+						return;
+					}
+					self.save_char = esc1;
 					try self.emit(esc1);
-					if (self.out_index == self.output.len) return;
-					self.save_char = esc2;
-					try self.emit(self.save_char);
-				}
-			},
-		}
-	}
+					if (self.out_index == self.expected_len) return;
 
-	fn readCodebook(
-		self: *Decoder,
-		comptime symbol_count: usize,
-		codebook: *CodebookDecoder(symbol_count),
-	) Error!void {
-		const num_len_bytes = try self.bits.readByteAligned();
-		if (@as(usize, num_len_bytes) * 2 > symbol_count) return Error.InvalidCodebook;
-
-		var lengths = [_]u8{0} ** symbol_count;
-		for (0..num_len_bytes) |i| {
-			const b = try self.bits.readByteAligned();
-			lengths[i * 2] = b >> 4;
-			lengths[i * 2 + 1] = b & 0x0F;
-		}
-		try codebook.initFromLengths(lengths[0..]);
-	}
-
-	fn decodeAll(self: *Decoder) Error!void {
-		self.lz_window[window_size - 1] = 0;
-		self.lz_window[window_size - 2] = 0;
-		self.lz_window[window_size - 3] = 0;
-		self.lz_ptr = 0;
-
-		while (self.out_index < self.output.len) {
-			if (self.has_previous_block) {
-				self.bits.alignToByte();
-				const consumed = self.bits.byteOffset() - self.block_start;
-				const skip = if ((consumed & 1) == 1) @as(usize, 3) else @as(usize, 2);
-				try self.bits.skipBytes(skip);
-			}
-
-			try self.readCodebook(256, &self.literal_code);
-			try self.readCodebook(64, &self.length_code);
-			try self.readCodebook(128, &self.offset_code);
-
-			self.has_previous_block = true;
-			self.block_start = self.bits.byteOffset();
-
-			var block_count: usize = 0;
-			while (block_count < block_size and self.out_index < self.output.len) {
-				const is_literal = (try self.bits.readBit()) == 1;
-				if (is_literal) {
-					const sym = try self.literal_code.decodeSymbol(&self.bits);
-					try self.outch(@intCast(sym));
-					block_count += 2;
-				} else {
-					const len_sym = try self.length_code.decodeSymbol(&self.bits);
-					const off_hi = try self.offset_code.decodeSymbol(&self.bits);
-					const off_lo = try self.bits.readBits(6);
-					const lz_offset: usize = (@as(usize, off_hi) << 6) | @as(usize, off_lo);
-
-					var remaining: usize = @intCast(len_sym);
-					var back_ptr: isize = @as(isize, @intCast(self.lz_ptr)) - @as(isize, @intCast(lz_offset));
-					while (remaining > 0 and self.out_index < self.output.len) : (remaining -= 1) {
-						const idx: usize = @intCast(@mod(back_ptr, @as(isize, window_size)));
-						const b = self.lz_window[idx];
-						back_ptr += 1;
-						try self.outch(b);
+					if (ch == esc1 and (self.expected_len - self.out_index) != 1) {
+						return;
 					}
-					block_count += 3;
+
+					self.rle_state = .none;
+					self.save_char = ch;
+					try self.emit(ch);
+				},
+				.esc2_seen => {
+					self.rle_state = .none;
+					if (ch != 0) {
+						var n = ch;
+						while (n > 1) : (n -= 1) {
+							try self.emit(self.save_char);
+							if (self.out_index == self.expected_len) return;
+						}
+					} else {
+						try self.emit(esc1);
+						if (self.out_index == self.expected_len) return;
+						self.save_char = esc2;
+						try self.emit(self.save_char);
+					}
+				},
+			}
+		}
+
+		fn readCodebook(
+			self: *Self,
+			comptime symbol_count: usize,
+			codebook: *CodebookDecoder(symbol_count),
+		) !void {
+			const num_len_bytes = try self.bits.readByteAligned();
+			if (@as(usize, num_len_bytes) * 2 > symbol_count) return Error.InvalidCodebook;
+
+			var lengths = [_]u8{0} ** symbol_count;
+			for (0..num_len_bytes) |i| {
+				const b = try self.bits.readByteAligned();
+				lengths[i * 2] = b >> 4;
+				lengths[i * 2 + 1] = b & 0x0F;
+			}
+			try codebook.initFromLengths(lengths[0..]);
+		}
+
+		fn decodeAll(self: *Self) !void {
+			self.lz_window[window_size - 1] = 0;
+			self.lz_window[window_size - 2] = 0;
+			self.lz_window[window_size - 3] = 0;
+			self.lz_ptr = 0;
+
+			while (self.out_index < self.expected_len) {
+				if (self.has_previous_block) {
+					self.bits.alignToByte();
+					const consumed = self.bits.byteOffset() - self.block_start;
+					const skip = if ((consumed & 1) == 1) @as(usize, 3) else @as(usize, 2);
+					try self.bits.skipBytes(skip);
+				}
+
+				try self.readCodebook(256, &self.literal_code);
+				try self.readCodebook(64, &self.length_code);
+				try self.readCodebook(128, &self.offset_code);
+
+				self.has_previous_block = true;
+				self.block_start = self.bits.byteOffset();
+
+				var block_count: usize = 0;
+				while (block_count < block_size and self.out_index < self.expected_len) {
+					const is_literal = (try self.bits.readBit()) == 1;
+					if (is_literal) {
+						const sym = try self.literal_code.decodeSymbol(&self.bits);
+						try self.outch(@intCast(sym));
+						block_count += 2;
+					} else {
+						const len_sym = try self.length_code.decodeSymbol(&self.bits);
+						const off_hi = try self.offset_code.decodeSymbol(&self.bits);
+						const off_lo = try self.bits.readBits(6);
+						const lz_offset: usize = (@as(usize, off_hi) << 6) | @as(usize, off_lo);
+
+						var remaining: usize = @intCast(len_sym);
+						var back_ptr: isize = @as(isize, @intCast(self.lz_ptr)) - @as(isize, @intCast(lz_offset));
+						while (remaining > 0 and self.out_index < self.expected_len) : (remaining -= 1) {
+							const idx: usize = @intCast(@mod(back_ptr, @as(isize, window_size)));
+							const b = self.lz_window[idx];
+							back_ptr += 1;
+							try self.outch(b);
+						}
+						block_count += 3;
+					}
 				}
 			}
 		}
-	}
-};
+	};
+}
 
 const Token = union(enum) {
 	literal: u8,
@@ -1275,13 +1295,25 @@ pub fn decode(allocator: std.mem.Allocator, compressed: []const u8, expected_len
 	const out = try allocator.alloc(u8, expected_len);
 	errdefer allocator.free(out);
 
-	var decoder = Decoder{
-		.bits = .{ .bytes = compressed },
-		.output = out,
+	var source = byte_io.SliceSource{ .bytes = compressed };
+	var sink = byte_io.SliceSink{ .out = out };
+	try decodeStream(&source, &sink, expected_len);
+	return out;
+}
+
+/// Streaming LZH+RLE decode: pulls compressed bytes from `source.next()` and
+/// pushes exactly `expected_len` decoded bytes to `sink.put`. Working memory is
+/// the fixed 8 KiB LZ window plus Huffman tables, independent of fork size.
+pub fn decodeStream(source: anytype, sink: anytype, expected_len: usize) !void {
+	const Source = @typeInfo(@TypeOf(source)).pointer.child;
+	const Sink = @typeInfo(@TypeOf(sink)).pointer.child;
+	var decoder = Decoder(Source, Sink){
+		.bits = .{ .source = source },
+		.sink = sink,
+		.expected_len = expected_len,
 	};
 	try decoder.decodeAll();
 	if (decoder.out_index != expected_len) return Error.OutputLengthMismatch;
-	return out;
 }
 
 // ---------------------------------------------------------------------------

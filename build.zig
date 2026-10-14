@@ -55,8 +55,21 @@ pub fn build(b: *std.Build) void {
 	});
 	const run_unit = b.addRunArtifact(unit_tests);
 
+	const stream_verify_tests = b.addTest(.{
+		.root_module = b.createModule(.{
+			.root_source_file = b.path("tests/unit/stream_verify_tests.zig"),
+			.target = target,
+			.optimize = optimize,
+			.imports = &.{
+				.{ .name = "core", .module = b.createModule(.{ .root_source_file = b.path("src/core.zig"), .target = target, .optimize = optimize }) },
+			},
+		}),
+	});
+	const run_stream_verify = b.addRunArtifact(stream_verify_tests);
+
 	const test_step = b.step("test", "Run unit tests");
 	test_step.dependOn(&run_unit.step);
+	test_step.dependOn(&run_stream_verify.step);
 
 	// Inline tests live alongside the code they exercise (e.g. private Huffman /
 	// match-finder helpers in lzh.zig that cannot be reached from the out-of-line

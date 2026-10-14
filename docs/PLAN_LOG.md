@@ -1,0 +1,38 @@
+# PLAN log
+
+Completed PLAN.md items retired by plan-retire, oldest retirement first.
+
+## Retired 2026-10-14
+
+- [x] [Done Criteria (current milestone)] Implement pure Zig core for Compact Pro archive parse/create/extract/add (RLE profile first, deterministic behavior). (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Provide stable C FFI over core for archive operations and memory ownership. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Ship C CLI binary named `compact-pro` with `--help`, `compress`, `expand`, `add`, `list`, and resource-fork options (`--sidecar`, `--rsrc`, `--xattr`). (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Add selective extraction (`expand --path`) and directory-aware archive path preservation. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Add cross-platform metadata extension trailer (appended out-of-band bytes) with best-effort restore + warnings on unsupported/failed metadata restore paths. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Add cross-platform build/test scripts: `./build`, `./test`, plus `./bm` and `./fuzz` entrypoints. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Add dependency management via `flake.nix` and Garnix + GitHub Actions CI scaffolding. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Write `README.md` with CI badges (Garnix + GitHub Actions), project description, and CLI options. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Create/push GitHub repo `compact_pro` via `gh` and confirm badge links resolve against the created remote. (completed 2026-02-20 12:05 EST)
+- [x] [Done Criteria (current milestone)] Update `CODE_MINIMAP.md` to reflect all new code/docs. (completed 2026-02-20 12:00 EST)
+- [x] [Done Criteria (current milestone)] Validate Windows target compatibility and fix platform-specific CLI build issues (`x86_64-windows`, `aarch64-windows`). (completed 2026-02-20 12:27 EST)
+- [x] [Done Criteria (current milestone)] Expand CI coverage matrix to Linux x86_64/aarch64, macOS aarch64, Windows x86_64, and Windows aarch64 cross-compile artifact job. (completed 2026-02-20 12:27 EST)
+- [x] [Done Criteria (current milestone)] Make `compact-pro compress` ergonomic: optional `-o`, `~` path expansion, auto `.cpt` extension, stdin input (`-`) and stdout output (`-`) support, with CLI regression tests. (completed 2026-02-20 13:09 EST)
+- [x] [Done Criteria (current milestone)] Implement metadata trailer v2 with hierarchical file/dir metadata, directory restore order, explicit cross-OS per-field restore warnings, and trailer-size listing output. (completed 2026-02-20 14:26 EST)
+- [x] [Done Criteria (current milestone)] Add CLI progress indication flags (`--progress`, `--no-progress`) for `compress`, `expand`, and `add` with CLI regression tests. (completed 2026-02-20 15:20 EST)
+- [x] [Done Criteria (current milestone)] Implement `./bm` benchmark suite comparing `compact-pro` vs `zip`/`gzip` for speed and compression ratio, including historical drift checks. (completed 2026-02-20 15:20 EST)
+- [x] [Done Criteria (current milestone)] Optimize RLE encode path to emit run opcodes for repeated non-`0x81` bytes and validate via new unit test + benchmark rerun. (completed 2026-02-20 15:24 EST)
+- [x] [Done Criteria (current milestone)] Add completion stats on `compress`/`expand` stderr output (MB/s + compression/expansion size reporting) with CLI regression tests. (completed 2026-02-20 15:27 EST)
+- [x] [Done Criteria (current milestone)] Optimize RLE decode path (preallocated output + chunked repeat fill) to reduce extraction overhead; validate via full suite + benchmark rerun. (completed 2026-02-20 15:29 EST)
+- [x] [Done Criteria (current milestone)] Fix CLI directory-input handling for `compress`/`add` (recursive expansion), including space-containing paths; add regression test. (completed 2026-02-20 15:36 EST)
+- [x] [Done Criteria (current milestone)] Implement safe output overwrite semantics for `compress`: default no-clobber with explicit `--force`/`-f`. (completed 2026-02-20 15:38 EST)
+- [x] [Done Criteria (current milestone)] Archive and restore empty-directory metadata via trailer records, including empty directory recreation on expand. (completed 2026-02-20 15:38 EST)
+- [x] [Done Criteria (current milestone)] Fix Compact Pro container count semantics in writer/parser (root and directory counts as full subtree entry totals) for legacy extractor compatibility. (completed 2026-02-20 16:31 EST)
+- [x] [Done Criteria (current milestone)] Fix Compact Pro header CRC coverage to include linearized entry metadata block (count/comment + all entry records) and lock with a regression unit test. (completed 2026-02-20 16:42 EST)
+- [x] [Done Criteria (current milestone)] Reproduce and fix RLE corruption around `0x81,0x81,0x81,0x82` sequences (seen in Fallout saves), with unit regression and `unar` validation against full Fallout archive. (completed 2026-02-20 16:51 EST)
+- [x] [Done Criteria (current milestone)] Remove `garnix.yaml` and move CI target selection into `flake.nix` checks (5-target matrix), plus Linux POSIX C macro fixes needed for flake cross-target builds. (completed 2026-02-20 17:02 EST)
+- [x] [Done Criteria (current milestone)] Optimization pass: speed up RLE encoder via literal-span batching and vectorized run-length scanning; validate with full test suite and benchmark rerun (`compact-pro` compress wall ~117.35ms -> ~111.45ms on `./bm --runs 2`). (completed 2026-02-20 17:47 EST)
+- [x] [Done Criteria (current milestone)] Implement LZH decode in pure Zig core (LZH+RLE pipeline) and validate against real Compact Pro fixture (`MacEnvy21.cpt`) via strict CRC + SHA-256 resource hash + CLI regression. (completed 2026-02-20 18:35 EST)
+- [x] [Done Criteria (current milestone)] Implement LZH encode in pure Zig core and wire archive writes to choose per-fork `RLE` vs `LZH(RLE)` by size, with metadata flag persistence and external `lsar`/`unar` verification. (completed 2026-02-20 18:46 EST)
+- [x] [Done Criteria (current milestone)] Reproduce and fix The Unarchiver incompatibility for generated archives by adding a `unar` multi-block regression and correcting LZH multi-block writer termination semantics (allowing block-token overshoot to reach `block_count >= 0x1fff0`). (completed 2026-02-20 20:20 EST)
+- [x] [Done Criteria (current milestone)] Optimization pass: speed up LZH encode match search via best-length candidate prefiltering, validate with full suite + benchmark rerun. (completed 2026-02-20 21:52 EST)
+- [x] [Continuity] Spec and fixture groundwork complete. (completed 2026-02-20 02:36 EST)

@@ -16,15 +16,20 @@
 - `src/crc32jam.zig`
   - JAMCRC implementation used for header and file payload CRC verification.
 
+- `src/byte_io.zig`
+  - Slice-backed byte source/sink adapters for the source/sink-generic RLE and LZH decoders.
+
 - `src/rle8182.zig`
   - Compact Pro RLE (`0x81/0x82`) encoder/decoder.
   - Encoder now emits repeat-run opcodes for repeated non-`0x81` bytes (thresholded to avoid size regressions on short runs).
   - Encoder `0x81` path now handles arbitrary runs of `0x81` bytes correctly (including `0x81,0x81,0x81,0x82` patterns) to avoid decode drift/checksum failures in external tools.
   - Encoder hot path now batches literal spans and uses vectorized repeated-byte run scanning plus slice-reserved run emission to reduce compress-time overhead on large inputs.
   - Decoder now writes into preallocated output and fills repeat runs in chunks to reduce extraction-time overhead.
+  - `decodeStream` is generic over a byte source and sink; `decode` is its in-memory instantiation, and the streaming verifier uses the same code.
 
 - `src/lzh.zig`
   - Pure Compact Pro LZH codec with per-block Huffman codebook parsing/writing, LZSS window copy/match finding, and integrated Compact Pro RLE decode stage.
+  - Decoder (`decodeStream`) is generic over byte source/sink with a fixed 8 KiB window, shared by buffered extraction and streaming verification.
   - Supports extraction of LZH-compressed forks from legacy archives and creation of LZH-over-RLE fork payloads for new archives.
   - Encoder match finder now prefilters chain candidates using current best-match boundary bytes to reduce needless byte-by-byte scans on large multi-block inputs.
   - Encode path now supports concurrent block emission: sequential tokenization preserves dictionary semantics, while block Huffman/bitstream encoding runs in parallel with deterministic ordered merge (`encodeWithWorkerLimit`; `encode` auto-selects worker count).
@@ -40,12 +45,15 @@
   - Read path decodes LZH forks through `src/lzh.zig`.
   - Write path picks per-fork compression strategy (`RLE` vs `LZH(RLE)`) by encoded size and emits full multi-block LZH streams using legacy block-count termination semantics (`>= 0x1fff0` with overshoot-permitted final token).
   - Adds archive-create progress callback plumbing that reports encode work units (RLE + LZH stages) for CLI progress/ETA rendering without introducing I/O into core.
+  - `verifyStream` verifies an archive in bounded memory from a caller range-read callback (`RangeSource`), streaming decoded forks to an optional `ForkSink`; header walking (`parseHeader`) is shared with `parseMetadata`.
+  - Data fork offsets are overflow-checked (`dataForkOffset`).
   - Progress accumulator is mutex-protected so callback dispatch remains safe when LZH block encoding runs concurrently.
 
 - `src/ffi.zig`
   - C ABI layer over core.
   - Exposes create/add/extract/list functions and matching free functions.
   - Adds `cp_archive_create_with_progress` callback-enabled entrypoint for encode progress reporting.
+  - `cp_archive_verify_stream` bridges C range-read and fork-sink callbacks to `core.verifyStream`.
   - Maps Zig errors to stable C error codes/messages.
 
 - `src/main.zig`
@@ -56,7 +64,7 @@
   - Public C header: input/output structs, list structs, API calls, progress callback type (`cp_progress_fn`), free helpers, and error codes.
 
 - `csrc/compact_pro_cli.c`
-  - CLI command parser and implementations for `compress`, `expand`, `add`, `list`.
+  - CLI command parser and implementations for `compress`, `expand`, `add`, `list`, `verify` (the latter dogfoods `cp_archive_verify_stream`).
   - Performs all file/resource-fork I/O.
   - `compress`/`add` recursively expand directory inputs into file entries (including paths containing spaces).
   - `compress` defaults to no-clobber output and supports `--force`/`-f` for explicit overwrite.

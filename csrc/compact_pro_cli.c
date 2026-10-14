@@ -177,6 +177,7 @@ static void print_help(void) {
 	puts("  compact-pro expand [--sidecar|--rsrc <path>|--xattr <name>] [--progress|--no-progress] <archive.cpt> [-d <outdir>] [--path <entry> ...]");
 	puts("  compact-pro add [--sidecar|--rsrc <path>|--xattr <name>] [--progress|--no-progress] <archive.cpt> <file...>");
 	puts("  compact-pro list <archive.cpt>");
+	puts("  compact-pro verify <archive.cpt|->   (bounded-memory integrity check)");
 	puts("  compact-pro --help");
 	puts("");
 	puts("Resource fork options:");
@@ -3254,6 +3255,124 @@ static int cmd_list(int argc, char **argv) {
 	return 0;
 }
 
+typedef struct {
+	FILE *file;
+	const uint8_t *bytes;
+} verify_input;
+
+/* cp_read_at_fn over either a seekable FILE* or an in-memory stdin buffer. */
+static int verify_read_at(void *ctx, uint64_t offset, uint8_t *buffer, size_t length, size_t *out_read) {
+	verify_input *in = (verify_input *)ctx;
+	if (in->bytes != NULL) {
+		memcpy(buffer, in->bytes + offset, length);
+		*out_read = length;
+		return 0;
+	}
+#if defined(_WIN32)
+	if (_fseeki64(in->file, (__int64)offset, SEEK_SET) != 0) return 1;
+#else
+	if (fseeko(in->file, (off_t)offset, SEEK_SET) != 0) return 1;
+#endif
+	*out_read = fread(buffer, 1, length, in->file);
+	return ferror(in->file) ? 1 : 0;
+}
+
+/* Mirrors expand's metadata-trailer handling so verify rejects whatever expand
+ * rejects: reads only the footer and trailer payload, parses the payload the
+ * way expand does, and limits the core check to the bytes before the trailer.
+ * Returns nonzero (after printing an error) when expand would reject. */
+static int verify_trailer(verify_input *in, uint64_t size, uint64_t *core_size) {
+	*core_size = size;
+	const size_t footer_len = 8 + 4 + 4;
+	if (size < footer_len) return 0;
+	uint8_t footer[8 + 4 + 4];
+	size_t got = 0;
+	if (verify_read_at(in, size - footer_len, footer, footer_len, &got) != 0 || got != footer_len) return fail("cannot read archive trailer");
+	if (memcmp(footer, meta_trailer_magic, 8) != 0) return 0;
+	if (read_u32_le(footer + 12) != meta_trailer_version) return 0;
+	uint64_t payload_len = read_u32_le(footer + 8);
+	if (payload_len > size - footer_len) return 0;
+
+	size_t tail_len = (size_t)(payload_len + footer_len);
+	uint8_t *tail = (uint8_t *)malloc(tail_len);
+	if (tail == NULL) return fail("out of memory");
+	if (verify_read_at(in, size - tail_len, tail, tail_len, &got) != 0 || got != tail_len) {
+		free(tail);
+		return fail("cannot read archive trailer");
+	}
+	const uint8_t *base = NULL;
+	size_t base_len = 0;
+	const uint8_t *blob = NULL;
+	size_t blob_len = 0;
+	split_archive_and_metadata(tail, tail_len, &base, &base_len, &blob, &blob_len, NULL);
+	meta_record *records = NULL;
+	size_t record_count = 0;
+	int rc = 0;
+	if (blob != NULL && parse_metadata_blob(blob, blob_len, &records, &record_count) != 0) {
+		rc = fail("verify failed: malformed metadata trailer");
+	}
+	free_meta_records(records, record_count);
+	free(tail);
+	*core_size = size - tail_len + base_len;
+	return rc;
+}
+
+static int cmd_verify(int argc, char **argv) {
+	const char *archive_path = NULL;
+	for (int i = 2; i < argc; ++i) {
+		if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+			print_help();
+			return 0;
+		}
+		archive_path = argv[i];
+	}
+	if (archive_path == NULL) return fail("verify requires archive path");
+
+	verify_input in = {0};
+	uint8_t *stdin_bytes = NULL;
+	uint64_t size = 0;
+	if (strcmp(archive_path, "-") == 0 || strcmp(archive_path, "@stdin") == 0) {
+		size_t len = 0;
+		if (read_file_required("-", &stdin_bytes, &len) != 0) return 1;
+		in.bytes = stdin_bytes;
+		size = len;
+	} else {
+		char *resolved = expand_tilde_path(archive_path);
+		if (resolved == NULL) return fail("out of memory");
+		in.file = fopen(resolved, "rb");
+		free(resolved);
+		if (in.file == NULL) {
+			fprintf(stderr, "error: cannot open %s: %s\n", archive_path, strerror(errno));
+			return 1;
+		}
+#if defined(_WIN32)
+		if (_fseeki64(in.file, 0, SEEK_END) != 0) { fclose(in.file); return fail("cannot seek archive"); }
+		size = (uint64_t)_ftelli64(in.file);
+#else
+		if (fseeko(in.file, 0, SEEK_END) != 0) { fclose(in.file); return fail("cannot seek archive"); }
+		size = (uint64_t)ftello(in.file);
+#endif
+	}
+
+	uint64_t core_size = size;
+	if (verify_trailer(&in, size, &core_size) != 0) {
+		if (in.file != NULL) fclose(in.file);
+		free(stdin_bytes);
+		return 1;
+	}
+	cp_range_source source = { .read_at = verify_read_at, .ctx = &in, .size = core_size };
+	cp_verify_summary summary = {0};
+	int rc = cp_archive_verify_stream(&source, 1, NULL, NULL, &summary);
+	if (in.file != NULL) fclose(in.file);
+	free(stdin_bytes);
+	if (rc != CP_OK) {
+		fprintf(stderr, "error: verify failed: %s\n", cp_error_string(rc));
+		return 1;
+	}
+	printf("ok\tentries=%zu\tbytes=%llu\n", summary.entry_count, (unsigned long long)summary.total_uncompressed);
+	return 0;
+}
+
 int compact_pro_cli_main(int argc, char **argv) {
 	if (argc <= 1 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
 		print_help();
@@ -3263,5 +3382,6 @@ int compact_pro_cli_main(int argc, char **argv) {
 	if (strcmp(argv[1], "expand") == 0) return cmd_expand(argc, argv);
 	if (strcmp(argv[1], "add") == 0) return cmd_add(argc, argv);
 	if (strcmp(argv[1], "list") == 0) return cmd_list(argc, argv);
-	return fail("unknown command (expected: compress, expand, add, list)");
+	if (strcmp(argv[1], "verify") == 0) return cmd_verify(argc, argv);
+	return fail("unknown command (expected: compress, expand, add, list, verify)");
 }

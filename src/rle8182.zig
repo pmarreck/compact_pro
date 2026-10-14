@@ -8,16 +8,29 @@ pub const Error = error{
 
 pub const EncodeProgressFn = *const fn (?*anyopaque, usize, usize) void;
 
+const byte_io = @import("byte_io.zig");
+pub const SliceSource = byte_io.SliceSource;
+pub const SliceSink = byte_io.SliceSink;
+
 pub fn decode(
 	allocator: std.mem.Allocator,
 	input: []const u8,
 	expected_len: usize,
 	strict: bool,
 ) Error![]u8 {
-	var out = try allocator.alloc(u8, expected_len);
+	const out = try allocator.alloc(u8, expected_len);
 	errdefer allocator.free(out);
+	var source = SliceSource{ .bytes = input };
+	var sink = SliceSink{ .out = out };
+	try decodeStream(&source, &sink, expected_len, strict);
+	return out;
+}
 
-	var i: usize = 0;
+/// Incremental 0x81/0x82 run-length decoder shared by the buffered and
+/// streaming extraction paths. Pulls bytes from `source.next()` (null = end of
+/// input) and pushes exactly `expected_len` bytes to `sink.put`/`sink.fill`,
+/// so decoding needs no output buffer of its own.
+pub fn decodeStream(source: anytype, sink: anytype, expected_len: usize, strict: bool) !void {
 	var out_len: usize = 0;
 	var saved: u8 = 0;
 	var repeat: usize = 0;
@@ -26,7 +39,7 @@ pub fn decode(
 	while (out_len < expected_len) {
 		if (repeat > 0) {
 			const fill_len = @min(repeat, expected_len - out_len);
-			@memset(out[out_len .. out_len + fill_len], saved);
+			try sink.fill(saved, fill_len);
 			out_len += fill_len;
 			repeat -= fill_len;
 			continue;
@@ -37,33 +50,27 @@ pub fn decode(
 				half_escaped = false;
 				break :blk 0x81;
 			}
-			if (i >= input.len) return Error.UnexpectedEndOfStream;
-			defer i += 1;
-			break :blk input[i];
+			break :blk (try source.next()) orelse return Error.UnexpectedEndOfStream;
 		};
 
 		if (b0 != 0x81) {
 			saved = b0;
-			out[out_len] = b0;
+			try sink.put(b0);
 			out_len += 1;
 			continue;
 		}
 
-		if (i >= input.len) return Error.UnexpectedEndOfStream;
-		const b1 = input[i];
-		i += 1;
+		const b1 = (try source.next()) orelse return Error.UnexpectedEndOfStream;
 
 		if (b1 == 0x82) {
-			if (i >= input.len) return Error.UnexpectedEndOfStream;
-			const n = input[i];
-			i += 1;
+			const n = (try source.next()) orelse return Error.UnexpectedEndOfStream;
 			if (n == 0x00) {
-				out[out_len] = 0x81;
+				try sink.put(0x81);
 				out_len += 1;
 				saved = 0x82;
 				repeat = 1;
 			} else if (n >= 0x02) {
-				out[out_len] = saved;
+				try sink.put(saved);
 				out_len += 1;
 				repeat = @as(usize, n) - 2;
 			} else {
@@ -73,21 +80,20 @@ pub fn decode(
 		}
 
 		if (b1 == 0x81) {
-			out[out_len] = 0x81;
+			try sink.put(0x81);
 			out_len += 1;
 			saved = 0x81;
 			half_escaped = true;
 			continue;
 		}
 
-		out[out_len] = 0x81;
+		try sink.put(0x81);
 		out_len += 1;
 		saved = b1;
 		repeat = 1;
 	}
 
 	if (out_len != expected_len) return Error.OutputLengthMismatch;
-	return out;
 }
 
 pub fn encodeWithProgress(

@@ -78,6 +78,8 @@ const cp_err_file_crc_mismatch = 12;
 const cp_err_invalid_run_length_one = 13;
 const cp_err_output_length_mismatch = 14;
 const cp_err_unexpected_end_of_stream = 15;
+const cp_err_read_failed = 16;
+const cp_err_sink_aborted = 17;
 const cp_err_out_of_memory = 100;
 const cp_err_unknown = 255;
 
@@ -98,6 +100,8 @@ fn mapError(err: anyerror) c_int {
 		error.InvalidRunLengthOne => cp_err_invalid_run_length_one,
 		error.OutputLengthMismatch => cp_err_output_length_mismatch,
 		error.UnexpectedEndOfStream => cp_err_unexpected_end_of_stream,
+		error.ReadFailed => cp_err_read_failed,
+		error.SinkAborted => cp_err_sink_aborted,
 		error.OutOfMemory => cp_err_out_of_memory,
 		else => cp_err_unknown,
 	};
@@ -301,6 +305,59 @@ pub export fn cp_archive_list(
 	return cp_ok;
 }
 
+pub const CpReadAtFn = ?*const fn (?*anyopaque, u64, ?[*]u8, usize, ?*usize) callconv(.c) c_int;
+pub const CpForkSinkFn = ?*const fn (?*anyopaque, usize, c_int, ?[*]const u8, usize) callconv(.c) c_int;
+
+pub const CpRangeSource = extern struct {
+	read_at: CpReadAtFn,
+	ctx: ?*anyopaque,
+	size: u64,
+};
+
+pub const CpVerifySummary = extern struct {
+	entry_count: usize,
+	total_uncompressed: u64,
+};
+
+/// Adapts the C range-read and fork-sink callbacks to core.RangeSource and
+/// core.ForkSink for the bounded-memory streaming verifier.
+const StreamBridge = struct {
+	source: CpRangeSource,
+	sink: CpForkSinkFn,
+	sink_ctx: ?*anyopaque,
+
+	fn readAt(ctx: ?*anyopaque, offset: u64, buf: []u8) core.ReadError!usize {
+		const self: *StreamBridge = @ptrCast(@alignCast(ctx.?));
+		var got: usize = 0;
+		if (self.source.read_at.?(self.source.ctx, offset, buf.ptr, buf.len, &got) != 0) return error.ReadFailed;
+		return got;
+	}
+
+	fn write(ctx: ?*anyopaque, entry_index: usize, fork: core.ForkKind, bytes: []const u8) core.SinkError!void {
+		const self: *StreamBridge = @ptrCast(@alignCast(ctx.?));
+		if (self.sink.?(self.sink_ctx, entry_index, @intFromEnum(fork), bytes.ptr, bytes.len) != 0) return error.SinkAborted;
+	}
+};
+
+pub export fn cp_archive_verify_stream(
+	source: ?*const CpRangeSource,
+	strict_crc: c_int,
+	sink: CpForkSinkFn,
+	sink_ctx: ?*anyopaque,
+	out_summary: ?*CpVerifySummary,
+) c_int {
+	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0 };
+	const src = source orelse return cp_err_invalid_argument;
+	if (src.read_at == null) return cp_err_invalid_argument;
+
+	var bridge = StreamBridge{ .source = src.*, .sink = sink, .sink_ctx = sink_ctx };
+	const range = core.RangeSource{ .ctx = &bridge, .size = src.size, .readAtFn = StreamBridge.readAt };
+	const fork_sink: ?core.ForkSink = if (sink != null) .{ .ctx = &bridge, .writeFn = StreamBridge.write } else null;
+	const summary = core.verifyStream(allocator, range, strict_crc != 0, fork_sink) catch |err| return mapError(err);
+	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed };
+	return cp_ok;
+}
+
 pub export fn cp_buffer_free(buffer: ?*CpBuffer) void {
 	if (buffer == null) return;
 	if (toMutableSlice(buffer.?.ptr, buffer.?.len)) |slice| allocator.free(slice);
@@ -353,6 +410,8 @@ pub export fn cp_error_string(code: c_int) [*:0]const u8 {
 		cp_err_invalid_run_length_one => "invalid run length one",
 		cp_err_output_length_mismatch => "output length mismatch",
 		cp_err_unexpected_end_of_stream => "unexpected end of stream",
+		cp_err_read_failed => "read failed",
+		cp_err_sink_aborted => "sink aborted",
 		cp_err_out_of_memory => "out of memory",
 		else => "unknown error",
 	};

@@ -410,3 +410,13 @@ test "parseMetadata: corrupted directory entry must not double-free (regression)
 
 	try std.testing.expectError(core.Error.Truncated, core.parseMetadata(allocator(), buf.items, false));
 }
+
+test "rle strict mode rejects a run length of one and lenient mode skips it" {
+	// 0x81 0x82 0x01 encodes "repeat 1 time", which no encoder emits; strict
+	// decoding (used for extraction and verification) must reject it.
+	const encoded = [_]u8{ 0x41, 0x81, 0x82, 0x01, 0x42 };
+	try std.testing.expectError(error.InvalidRunLengthOne, core.rle8182.decode(allocator(), &encoded, 2, true));
+	const lenient = try core.rle8182.decode(allocator(), &encoded, 2, false);
+	defer allocator().free(lenient);
+	try std.testing.expectEqualSlices(u8, "AB", lenient);
+}

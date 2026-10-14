@@ -89,7 +89,38 @@ pub const Error = error{
 	DuplicateEntryPath,
 	OffsetOutOfRange,
 	FileCrcMismatch,
-} || rle8182.Error || lzh.Error || std.mem.Allocator.Error;
+} || ReadError || SinkError || rle8182.Error || lzh.Error || std.mem.Allocator.Error;
+
+pub const ReadError = error{ReadFailed};
+pub const SinkError = error{SinkAborted};
+
+/// Caller-supplied seekable input for `verifyStream`. `readAtFn` copies up to
+/// `buf.len` bytes starting at `offset` and returns the count; a short count is
+/// allowed, but returning 0 before `size` is reached is a read failure.
+pub const RangeSource = struct {
+	ctx: ?*anyopaque,
+	size: u64,
+	readAtFn: *const fn (ctx: ?*anyopaque, offset: u64, buf: []u8) ReadError!usize,
+};
+
+pub const ForkKind = enum(u8) { data = 0, resource = 1 };
+
+/// Receives decoded fork bytes in order, chunk by chunk. Bytes of a fork are
+/// unverified until `verifyStream` has checked that entry's CRC.
+pub const ForkSink = struct {
+	ctx: ?*anyopaque,
+	writeFn: *const fn (ctx: ?*anyopaque, entry_index: usize, fork: ForkKind, bytes: []const u8) SinkError!void,
+};
+
+pub const VerifySummary = struct {
+	entry_count: usize,
+	total_uncompressed: u64,
+};
+
+/// Size of each of the two fixed streaming buffers (input cursor, output sink).
+pub const verify_stream_buffer_size: usize = 64 * 1024;
+/// Upper bound on `verifyStream` heap use apart from the parsed entry table.
+pub const verify_stream_memory_budget: usize = 4 * verify_stream_buffer_size;
 
 const FileAccumulator = struct {
 	allocator: std.mem.Allocator,
@@ -108,6 +139,15 @@ const FileAccumulator = struct {
 const Reader = struct {
 	bytes: []const u8,
 	index: usize,
+	crc_start: usize = 0,
+
+	fn beginCrc(self: *Reader) void {
+		self.crc_start = self.index;
+	}
+
+	fn crcValue(self: *const Reader) u32 {
+		return crc.jamcrc(self.bytes[self.crc_start..self.index]);
+	}
 
 	fn readU8(self: *Reader) Error!u8 {
 		if (self.index + 1 > self.bytes.len) return Error.Truncated;
@@ -175,8 +215,15 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 	if (header_offset >= archive.len) return Error.InvalidHeaderOffset;
 
 	var reader = Reader{ .bytes = archive, .index = header_offset };
+	return parseHeader(allocator, &reader, strict_crc);
+}
+
+/// Walks the Compact Pro directory header (CRC, entry count, comment, nested
+/// entry records) from any reader positioned at the header offset. Shared by
+/// the in-memory parser and the streaming verifier so both validate alike.
+fn parseHeader(allocator: std.mem.Allocator, reader: anytype, strict_crc: bool) Error!ParsedMetadata {
 	const header_crc = try reader.readU32();
-	const crc_start = reader.index;
+	reader.beginCrc();
 	const entry_count = try reader.readU16();
 	const comment_len = try reader.readU8();
 	const comment_src = try reader.readSlice(comment_len);
@@ -187,13 +234,9 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 
 	var acc = FileAccumulator{ .allocator = allocator };
 	errdefer acc.deinit();
-	try parseDirectoryEntries(allocator, &reader, &acc, "", entry_count);
-	const crc_end = reader.index;
+	try parseDirectoryEntries(allocator, reader, &acc, "", entry_count);
 
-	if (strict_crc) {
-		const computed = crc.jamcrc(archive[crc_start..crc_end]);
-		if (computed != header_crc) return Error.HeaderCrcMismatch;
-	}
+	if (strict_crc and reader.crcValue() != header_crc) return Error.HeaderCrcMismatch;
 
 	return .{
 		.comment = comment,
@@ -203,7 +246,7 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 
 fn parseDirectoryEntries(
 	allocator: std.mem.Allocator,
-	reader: *Reader,
+	reader: anytype,
 	acc: *FileAccumulator,
 	prefix: []const u8,
 	entry_count: usize,
@@ -268,6 +311,12 @@ fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, part: []const u8) 
 	return out;
 }
 
+/// Data fork bytes follow the resource fork; a sum past u32 is out of range
+/// rather than a wrapped pointer back into the archive.
+fn dataForkOffset(meta: MetadataEntry) Error!u32 {
+	return std.math.add(u32, meta.fork_data_offset, meta.resource_compressed_len) catch Error.OffsetOutOfRange;
+}
+
 fn readForkSlice(archive: []const u8, offset: u32, len: u32) Error![]const u8 {
 	const start: usize = @intCast(offset);
 	const size: usize = @intCast(len);
@@ -326,7 +375,7 @@ pub fn extractAll(allocator: std.mem.Allocator, archive: []const u8, strict_crc:
 			try allocator.alloc(u8, 0);
 		errdefer allocator.free(resource);
 
-		const data_offset = meta.fork_data_offset + meta.resource_compressed_len;
+		const data_offset = try dataForkOffset(meta);
 		const data = if (data_exists)
 			try decodeFork(
 				allocator,
@@ -364,6 +413,199 @@ pub fn extractAll(allocator: std.mem.Allocator, archive: []const u8, strict_crc:
 		.comment = try allocator.dupe(u8, metadata.comment),
 		.entries = try out_entries.toOwnedSlice(allocator),
 	};
+}
+
+/// Buffered forward cursor over a `RangeSource` window [pos, end). Refills a
+/// fixed heap buffer through the caller's read callback, so archive bytes are
+/// never held beyond one buffer. `next` returns null at the window end.
+const RangeCursor = struct {
+	source: RangeSource,
+	buf: []u8,
+	pos: u64,
+	end: u64,
+	buf_start: u64 = 0,
+	buf_len: usize = 0,
+
+	fn init(source: RangeSource, buf: []u8, start: u64, end: u64) RangeCursor {
+		return .{ .source = source, .buf = buf, .pos = start, .end = end };
+	}
+
+	fn refill(self: *RangeCursor) ReadError!void {
+		const want: usize = @intCast(@min(@as(u64, self.buf.len), self.end - self.pos));
+		var got: usize = 0;
+		while (got < want) {
+			const n = try self.source.readAtFn(self.source.ctx, self.pos + got, self.buf[got..want]);
+			if (n == 0 or n > want - got) return error.ReadFailed;
+			got += n;
+		}
+		self.buf_start = self.pos;
+		self.buf_len = got;
+	}
+
+	pub inline fn next(self: *RangeCursor) ReadError!?u8 {
+		if (self.pos >= self.end) return null;
+		if (self.pos < self.buf_start or self.pos >= self.buf_start + self.buf_len) try self.refill();
+		const b = self.buf[@intCast(self.pos - self.buf_start)];
+		self.pos += 1;
+		return b;
+	}
+};
+
+/// Header reader over a `RangeCursor` with the same interface as `Reader`.
+/// `readSlice` returns a view into scratch storage valid until the next read;
+/// Compact Pro names (<=127) and comments (<=255) always fit.
+const StreamReader = struct {
+	cursor: *RangeCursor,
+	scratch: [256]u8 = undefined,
+	crc_active: bool = false,
+	crc_state: u32 = crc.initial,
+
+	fn readByte(self: *StreamReader) Error!u8 {
+		const b = (try self.cursor.next()) orelse return Error.Truncated;
+		if (self.crc_active) self.crc_state = crc.update(self.crc_state, &.{b});
+		return b;
+	}
+
+	fn readU8(self: *StreamReader) Error!u8 {
+		return self.readByte();
+	}
+
+	fn readU16(self: *StreamReader) Error!u16 {
+		var out: u16 = 0;
+		for (0..2) |_| out = (out << 8) | try self.readByte();
+		return out;
+	}
+
+	fn readU32(self: *StreamReader) Error!u32 {
+		var out: u32 = 0;
+		for (0..4) |_| out = (out << 8) | try self.readByte();
+		return out;
+	}
+
+	fn readSlice(self: *StreamReader, len: usize) Error![]const u8 {
+		if (len > self.scratch.len) return Error.Truncated;
+		for (self.scratch[0..len]) |*b| b.* = try self.readByte();
+		return self.scratch[0..len];
+	}
+
+	fn beginCrc(self: *StreamReader) void {
+		self.crc_active = true;
+		self.crc_state = crc.initial;
+	}
+
+	fn crcValue(self: *const StreamReader) u32 {
+		return self.crc_state;
+	}
+};
+
+/// Output side of streaming verification: batches decoded bytes into a fixed
+/// buffer, folds each flush into the running file CRC and forwards it to the
+/// optional caller sink.
+const VerifySink = struct {
+	buf: []u8,
+	len: usize = 0,
+	crc_state: u32 = crc.initial,
+	track_crc: bool,
+	user: ?ForkSink,
+	entry_index: usize = 0,
+	fork: ForkKind = .data,
+
+	fn flush(self: *VerifySink) SinkError!void {
+		if (self.len == 0) return;
+		const chunk = self.buf[0..self.len];
+		if (self.track_crc) self.crc_state = crc.update(self.crc_state, chunk);
+		if (self.user) |u| try u.writeFn(u.ctx, self.entry_index, self.fork, chunk);
+		self.len = 0;
+	}
+
+	pub inline fn put(self: *VerifySink, b: u8) SinkError!void {
+		self.buf[self.len] = b;
+		self.len += 1;
+		if (self.len == self.buf.len) try self.flush();
+	}
+
+	pub fn fill(self: *VerifySink, b: u8, n: usize) SinkError!void {
+		var left = n;
+		while (left > 0) {
+			const take = @min(left, self.buf.len - self.len);
+			@memset(self.buf[self.len .. self.len + take], b);
+			self.len += take;
+			left -= take;
+			if (self.len == self.buf.len) try self.flush();
+		}
+	}
+};
+
+fn streamFork(
+	source: RangeSource,
+	in_buf: []u8,
+	sink: *VerifySink,
+	offset: u32,
+	compressed_len: u32,
+	uncompressed_len: u32,
+	lzh_enabled: bool,
+) Error!void {
+	if (uncompressed_len == 0 and compressed_len == 0) return;
+	const start: u64 = offset;
+	const end = start + compressed_len;
+	if (end > source.size) return Error.OffsetOutOfRange;
+	var cursor = RangeCursor.init(source, in_buf, start, end);
+	if (lzh_enabled) {
+		try lzh.decodeStream(&cursor, sink, uncompressed_len);
+	} else {
+		try rle8182.decodeStream(&cursor, sink, uncompressed_len, true);
+	}
+	try sink.flush();
+}
+
+/// Bounded-memory archive verification for consumers such as `validate`:
+/// reads the archive through a range callback, decodes every fork with the
+/// same RLE/LZH decoders as `extractAll`, checks header and per-file CRCs, and
+/// streams decoded bytes to an optional sink instead of retaining them.
+/// Returns the same errors as `extractAll` for the same archive bytes.
+pub fn verifyStream(allocator: std.mem.Allocator, source: RangeSource, strict_crc: bool, sink: ?ForkSink) Error!VerifySummary {
+	const in_buf = try allocator.alloc(u8, verify_stream_buffer_size);
+	defer allocator.free(in_buf);
+	const out_buf = try allocator.alloc(u8, verify_stream_buffer_size);
+	defer allocator.free(out_buf);
+
+	if (source.size < 8) return Error.Truncated;
+	var preamble_cursor = RangeCursor.init(source, in_buf, 0, 8);
+	var preamble = StreamReader{ .cursor = &preamble_cursor };
+	if (try preamble.readU8() != 0x01) return Error.InvalidMarker;
+	_ = try preamble.readU8();
+	_ = try preamble.readU16();
+	const header_offset = try preamble.readU32();
+	if (header_offset >= source.size) return Error.InvalidHeaderOffset;
+
+	var header_cursor = RangeCursor.init(source, in_buf, header_offset, source.size);
+	var header = StreamReader{ .cursor = &header_cursor };
+	const metadata = try parseHeader(allocator, &header, strict_crc);
+	defer metadata.deinit(allocator);
+
+	var total: u64 = 0;
+	for (metadata.entries, 0..) |meta, index| {
+		if ((meta.flags & flag_encrypted) != 0) return Error.UnsupportedEncryptedEntry;
+		const resource_exists = meta.resource_uncompressed_len > 0;
+		const data_exists = meta.data_uncompressed_len > 0 or !resource_exists;
+		var out = VerifySink{ .buf = out_buf, .track_crc = strict_crc, .user = sink, .entry_index = index };
+
+		if (resource_exists) {
+			out.fork = .resource;
+			try streamFork(source, in_buf, &out, meta.fork_data_offset, meta.resource_compressed_len, meta.resource_uncompressed_len, (meta.flags & flag_lzh_resource) != 0);
+		}
+		const data_offset = try dataForkOffset(meta);
+		if (data_exists) {
+			out.fork = .data;
+			try streamFork(source, in_buf, &out, data_offset, meta.data_compressed_len, meta.data_uncompressed_len, (meta.flags & flag_lzh_data) != 0);
+		}
+
+		if (strict_crc and out.crc_state != meta.file_crc) return Error.FileCrcMismatch;
+		if (resource_exists) total += meta.resource_uncompressed_len;
+		if (data_exists) total += meta.data_uncompressed_len;
+	}
+
+	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total };
 }
 
 const EncodedForks = struct {

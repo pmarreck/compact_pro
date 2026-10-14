@@ -25,6 +25,8 @@ enum {
 	CP_ERR_INVALID_RUN_LENGTH_ONE = 13,
 	CP_ERR_OUTPUT_LENGTH_MISMATCH = 14,
 	CP_ERR_UNEXPECTED_END_OF_STREAM = 15,
+	CP_ERR_READ_FAILED = 16,
+	CP_ERR_SINK_ABORTED = 17,
 	CP_ERR_OUT_OF_MEMORY = 100,
 	CP_ERR_UNKNOWN = 255
 };
@@ -124,6 +126,44 @@ int cp_archive_list(
 	size_t archive_len,
 	int strict_crc,
 	cp_archive_listing *out_listing
+);
+
+enum {
+	CP_FORK_DATA = 0,
+	CP_FORK_RESOURCE = 1
+};
+
+/* Copies up to `length` bytes at `offset` into `buffer` and stores the count
+ * in `*out_read`. Return 0 on success, nonzero on I/O failure. A zero count
+ * before `size` is reached is treated as CP_ERR_READ_FAILED. */
+typedef int (*cp_read_at_fn)(void *ctx, uint64_t offset, uint8_t *buffer, size_t length, size_t *out_read);
+
+/* Receives decoded fork bytes in order. Bytes are unverified until the call
+ * that produced them returns CP_OK. Return 0 to continue, nonzero to stop
+ * with CP_ERR_SINK_ABORTED. */
+typedef int (*cp_fork_sink_fn)(void *ctx, size_t entry_index, int fork_kind, const uint8_t *bytes, size_t length);
+
+typedef struct {
+	cp_read_at_fn read_at;
+	void *ctx;
+	uint64_t size;
+} cp_range_source;
+
+typedef struct {
+	size_t entry_count;
+	uint64_t total_uncompressed;
+} cp_verify_summary;
+
+/* Bounded-memory verification: reads the archive through `source`, decodes
+ * every fork and checks CRCs like cp_archive_extract (same error codes),
+ * without retaining the archive or its output. `sink` may be NULL;
+ * `out_summary` may be NULL. */
+int cp_archive_verify_stream(
+	const cp_range_source *source,
+	int strict_crc,
+	cp_fork_sink_fn sink,
+	void *sink_ctx,
+	cp_verify_summary *out_summary
 );
 
 void cp_buffer_free(cp_buffer *buffer);

@@ -160,6 +160,7 @@
 					zip
 					unzip
 					gzip
+					unar # The Unarchiver CLI: external Compact Pro decoder for interop tests
 				]);
 			};
 		});
