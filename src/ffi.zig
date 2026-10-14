@@ -233,7 +233,29 @@ pub export fn cp_archive_extract(
 	clearArchiveOutput(out_archive.?);
 
 	const archive = toConstSlice(archive_ptr, archive_len) catch |err| return mapError(err);
-	var extracted = core.extractAll(allocator, archive, strict_crc != 0) catch |err| return mapError(err);
+	const extracted = core.extractAll(allocator, archive, strict_crc != 0) catch |err| return mapError(err);
+	return publishExtracted(extracted, out_archive.?);
+}
+
+pub export fn cp_archive_extract_parallel(
+	archive_ptr: ?[*]const u8,
+	archive_len: usize,
+	strict_crc: c_int,
+	workers: usize,
+	out_archive: ?*CpArchiveOutput,
+) c_int {
+	if (out_archive == null) return cp_err_invalid_argument;
+	clearArchiveOutput(out_archive.?);
+
+	const archive = toConstSlice(archive_ptr, archive_len) catch |err| return mapError(err);
+	const extracted = core.extractAllParallel(allocator, archive, strict_crc != 0, workers) catch |err| return mapError(err);
+	return publishExtracted(extracted, out_archive.?);
+}
+
+/// Moves a core extraction result into the C output struct (ownership passes
+/// to the caller, released by cp_archive_output_free).
+fn publishExtracted(extracted_in: core.ExtractedArchive, out: *CpArchiveOutput) c_int {
+	var extracted = extracted_in;
 
 	var c_entries: []CpEntryOutput = &.{};
 	if (extracted.entries.len > 0) {
@@ -261,10 +283,10 @@ pub export fn cp_archive_extract(
 	}
 
 	const entries_meta = extracted.entries;
-	out_archive.?.comment_ptr = if (extracted.comment.len == 0) null else extracted.comment.ptr;
-	out_archive.?.comment_len = extracted.comment.len;
-	out_archive.?.entries_ptr = if (c_entries.len == 0) null else c_entries.ptr;
-	out_archive.?.entry_count = c_entries.len;
+	out.comment_ptr = if (extracted.comment.len == 0) null else extracted.comment.ptr;
+	out.comment_len = extracted.comment.len;
+	out.entries_ptr = if (c_entries.len == 0) null else c_entries.ptr;
+	out.entry_count = c_entries.len;
 	allocator.free(entries_meta);
 	return cp_ok;
 }

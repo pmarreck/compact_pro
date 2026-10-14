@@ -476,3 +476,48 @@ test "verifyStreamParallel memory stays bounded per worker" {
 	// Four workers' fixed buffers plus a small entry table and result slots.
 	try std.testing.expect(peak.peak <= 4 * core.verify_stream_memory_budget);
 }
+
+fn expectSameExtraction(archive: []const u8, workers: usize) !void {
+	const want = core.extractAll(allocator(), archive, true);
+	const got = core.extractAllParallel(allocator(), archive, true, workers);
+	if (want) |w| {
+		var wv = w;
+		defer wv.deinit(allocator());
+		var gv = try got;
+		defer gv.deinit(allocator());
+		try std.testing.expectEqualSlices(u8, wv.comment, gv.comment);
+		try std.testing.expectEqual(wv.entries.len, gv.entries.len);
+		for (wv.entries, gv.entries) |a, b| {
+			try std.testing.expectEqualSlices(u8, a.name, b.name);
+			try std.testing.expectEqualSlices(u8, a.data, b.data);
+			try std.testing.expectEqualSlices(u8, a.resource, b.resource);
+			try std.testing.expectEqual(a.file_type, b.file_type);
+			try std.testing.expectEqual(a.modified, b.modified);
+		}
+	} else |want_err| {
+		if (got) |g| {
+			var gv = g;
+			gv.deinit(allocator());
+			return error.TestUnexpectedResult;
+		} else |got_err| try std.testing.expectEqual(want_err, got_err);
+	}
+}
+
+test "extractAllParallel equals extractAll for every single-bit flip and truncation" {
+	const archive = try buildMultiEntryArchive(allocator());
+	defer allocator().free(archive);
+	try expectSameExtraction(archive, 4);
+	const work = try allocator().dupe(u8, archive);
+	defer allocator().free(work);
+	for (0..work.len) |byte_index| {
+		for (0..8) |bit| {
+			const mask = @as(u8, 1) << @intCast(bit);
+			work[byte_index] ^= mask;
+			defer work[byte_index] ^= mask;
+			try expectSameExtraction(work, 4);
+		}
+	}
+	for (0..archive.len) |len| {
+		for ([_]usize{ 1, 3, 16 }) |workers| try expectSameExtraction(archive[0..len], workers);
+	}
+}

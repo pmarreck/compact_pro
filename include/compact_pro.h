@@ -123,6 +123,17 @@ int cp_archive_extract(
 	cp_archive_output *out_archive
 );
 
+/* Like cp_archive_extract, but decodes entries on up to `workers` threads
+ * (0 = CPU count, capped at 16). Results and error codes are identical to
+ * cp_archive_extract. */
+int cp_archive_extract_parallel(
+	const uint8_t *archive,
+	size_t archive_len,
+	int strict_crc,
+	size_t workers,
+	cp_archive_output *out_archive
+);
+
 int cp_archive_list(
 	const uint8_t *archive,
 	size_t archive_len,

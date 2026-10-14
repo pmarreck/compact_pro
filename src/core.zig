@@ -357,70 +357,140 @@ pub fn extractAll(allocator: std.mem.Allocator, archive: []const u8, strict_crc:
 
 	var out_entries: std.ArrayListUnmanaged(ExtractedEntry) = .empty;
 	errdefer {
-		for (out_entries.items) |entry| {
-			allocator.free(entry.name);
-			allocator.free(entry.data);
-			allocator.free(entry.resource);
-		}
+		for (out_entries.items) |entry| freeExtractedEntry(allocator, entry);
 		out_entries.deinit(allocator);
 	}
 
 	for (metadata.entries) |meta| {
-		if ((meta.flags & flag_encrypted) != 0) return Error.UnsupportedEncryptedEntry;
-		const resource_exists = meta.resource_uncompressed_len > 0;
-		const data_exists = meta.data_uncompressed_len > 0 or !resource_exists;
-
-		const resource = if (resource_exists)
-			try decodeFork(
-				allocator,
-				archive,
-				meta.fork_data_offset,
-				meta.resource_compressed_len,
-				meta.resource_uncompressed_len,
-				(meta.flags & flag_lzh_resource) != 0,
-			)
-		else
-			try allocator.alloc(u8, 0);
-		errdefer allocator.free(resource);
-
-		const data_offset = try dataForkOffset(meta);
-		const data = if (data_exists)
-			try decodeFork(
-				allocator,
-				archive,
-				data_offset,
-				meta.data_compressed_len,
-				meta.data_uncompressed_len,
-				(meta.flags & flag_lzh_data) != 0,
-			)
-		else
-			try allocator.alloc(u8, 0);
-		errdefer allocator.free(data);
-
-		if (strict_crc) {
-			var computed = crc.update(crc.initial, resource);
-			computed = crc.update(computed, data);
-			if (computed != meta.file_crc) return Error.FileCrcMismatch;
-		}
-
-		const copied_name = try allocator.alloc(u8, meta.name.len);
-		@memcpy(copied_name, meta.name);
-		try out_entries.append(allocator, .{
-			.name = copied_name,
-			.data = data,
-			.resource = resource,
-			.file_type = meta.file_type,
-			.creator = meta.creator,
-			.created = meta.created,
-			.modified = meta.modified,
-			.finder_flags = meta.finder_flags,
-		});
+		const entry = try extractEntry(allocator, archive, meta, strict_crc);
+		out_entries.append(allocator, entry) catch |err| {
+			freeExtractedEntry(allocator, entry);
+			return err;
+		};
 	}
 
 	return .{
 		.comment = try allocator.dupe(u8, metadata.comment),
 		.entries = try out_entries.toOwnedSlice(allocator),
 	};
+}
+
+fn freeExtractedEntry(allocator: std.mem.Allocator, entry: ExtractedEntry) void {
+	allocator.free(entry.name);
+	allocator.free(entry.data);
+	allocator.free(entry.resource);
+}
+
+/// Decodes one entry's resource and data forks into owned buffers and checks
+/// its file CRC. Entries are independent, so this also runs on worker threads.
+fn extractEntry(allocator: std.mem.Allocator, archive: []const u8, meta: MetadataEntry, strict_crc: bool) Error!ExtractedEntry {
+	if ((meta.flags & flag_encrypted) != 0) return Error.UnsupportedEncryptedEntry;
+	const resource_exists = meta.resource_uncompressed_len > 0;
+	const data_exists = meta.data_uncompressed_len > 0 or !resource_exists;
+
+	const resource = if (resource_exists)
+		try decodeFork(allocator, archive, meta.fork_data_offset, meta.resource_compressed_len, meta.resource_uncompressed_len, (meta.flags & flag_lzh_resource) != 0)
+	else
+		try allocator.alloc(u8, 0);
+	errdefer allocator.free(resource);
+
+	const data_offset = try dataForkOffset(meta);
+	const data = if (data_exists)
+		try decodeFork(allocator, archive, data_offset, meta.data_compressed_len, meta.data_uncompressed_len, (meta.flags & flag_lzh_data) != 0)
+	else
+		try allocator.alloc(u8, 0);
+	errdefer allocator.free(data);
+
+	if (strict_crc) {
+		var computed = crc.update(crc.initial, resource);
+		computed = crc.update(computed, data);
+		if (computed != meta.file_crc) return Error.FileCrcMismatch;
+	}
+
+	return .{
+		.name = try allocator.dupe(u8, meta.name),
+		.data = data,
+		.resource = resource,
+		.file_type = meta.file_type,
+		.creator = meta.creator,
+		.created = meta.created,
+		.modified = meta.modified,
+		.finder_flags = meta.finder_flags,
+	};
+}
+
+/// Multithreaded `extractAll`: entries are decoded concurrently on up to
+/// `workers` threads (0 = CPU count, capped at `verify_default_max_workers`).
+/// The result, or the error, is identical to `extractAll` (the lowest-index
+/// failing entry wins). Output memory is the same as `extractAll`, since every
+/// entry is returned. `allocator` is used from several threads and must be
+/// thread-safe.
+pub fn extractAllParallel(allocator: std.mem.Allocator, archive: []const u8, strict_crc: bool, workers: usize) Error!ExtractedArchive {
+	const metadata = try parseMetadata(allocator, archive, strict_crc);
+	defer metadata.deinit(allocator);
+	const count = metadata.entries.len;
+
+	const slots = try allocator.alloc(ExtractSlot, count);
+	defer allocator.free(slots);
+	@memset(slots, .{});
+	errdefer for (slots) |slot| {
+		if (slot.entry) |e| freeExtractedEntry(allocator, e);
+	};
+
+	const wanted = if (workers == 0) @min(std.Thread.getCpuCount() catch 1, verify_default_max_workers) else workers;
+	const worker_count = @max(1, @min(@min(wanted, verify_max_workers), count));
+	var shared = ParallelExtract{ .allocator = allocator, .archive = archive, .strict_crc = strict_crc, .entries = metadata.entries, .slots = slots };
+	if (count > 0) {
+		const threads = try allocator.alloc(std.Thread, worker_count);
+		defer allocator.free(threads);
+		var spawned: usize = 0;
+		for (1..worker_count) |_| {
+			threads[spawned] = std.Thread.spawn(.{ .stack_size = verify_worker_stack_size }, runExtractWorker, .{&shared}) catch break;
+			spawned += 1;
+		}
+		runExtractWorker(&shared);
+		for (threads[0..spawned]) |t| t.join();
+	}
+
+	for (slots) |slot| if (slot.err) |err| return err;
+
+	const entries = try allocator.alloc(ExtractedEntry, count);
+	errdefer allocator.free(entries);
+	const comment = try allocator.dupe(u8, metadata.comment);
+	for (slots, entries) |*slot, *out| {
+		out.* = slot.entry.?;
+		slot.entry = null;
+	}
+	return .{ .comment = comment, .entries = entries };
+}
+
+const ExtractSlot = struct {
+	entry: ?ExtractedEntry = null,
+	err: ?Error = null,
+};
+
+/// Work queue for `extractAllParallel` (same claiming scheme as verification).
+const ParallelExtract = struct {
+	allocator: std.mem.Allocator,
+	archive: []const u8,
+	strict_crc: bool,
+	entries: []const MetadataEntry,
+	slots: []ExtractSlot,
+	next: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+	first_failure: std.atomic.Value(usize) = std.atomic.Value(usize).init(std.math.maxInt(usize)),
+};
+
+fn runExtractWorker(s: *ParallelExtract) void {
+	while (true) {
+		const i = s.next.fetchAdd(1, .monotonic);
+		if (i >= s.entries.len or i > s.first_failure.load(.monotonic)) return;
+		if (extractEntry(s.allocator, s.archive, s.entries[i], s.strict_crc)) |entry| {
+			s.slots[i].entry = entry;
+		} else |err| {
+			s.slots[i].err = err;
+			_ = s.first_failure.fetchMin(i, .monotonic);
+		}
+	}
 }
 
 /// Buffered forward cursor over a `RangeSource` window [pos, end). Refills a

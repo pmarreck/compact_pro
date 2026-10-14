@@ -2727,7 +2727,7 @@ static int cmd_expand(int argc, char **argv) {
 		.started_at = 0,
 	};
 	phase_heartbeat_begin(&decode_hb, "expand-decode");
-	int rc = cp_archive_extract(base_archive, base_archive_len, 1, &extracted);
+	int rc = cp_archive_extract_parallel(base_archive, base_archive_len, 1, 0, &extracted);
 	phase_heartbeat_end(&decode_hb);
 	free(archive_bytes);
 	if (rc != CP_OK) {

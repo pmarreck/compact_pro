@@ -88,6 +88,7 @@ Usage:
     - default is progress on TTY stderr.
     - live output renders phase bars with percent and ETA.
   - `--path <entry>` may be repeated to extract only selected entries.
+  - Entries are decoded on all CPU cores (up to 16) through `cp_archive_extract_parallel`; output and errors are identical to `cp_archive_extract`.
   - Restores file and directory metadata from the appended trailer when present.
   - Unsupported/unrestorable fields emit explicit warnings with the specific field name and do not abort data extraction.
 
