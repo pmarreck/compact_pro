@@ -1,0 +1,7 @@
+# Mechatron Prime CI targets (built on an x86_64-linux worker).
+# The macOS check needs an aarch64-darwin builder and is not listed.
+packages.x86_64-linux.default
+checks.x86_64-linux.ci-linux-x86_64
+checks.x86_64-linux.ci-linux-aarch64
+checks.x86_64-linux.ci-windows-x86_64
+checks.x86_64-linux.ci-windows-aarch64

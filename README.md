@@ -1,6 +1,6 @@
 # compact_pro
 
-[![built with garnix](https://img.shields.io/endpoint.svg?url=https%3A%2F%2Fgarnix.io%2Fapi%2Fbadges%2Fpmarreck%2Fcompact_pro%3Fbranch%3Dyolo)](https://app.garnix.io/repo/pmarreck/compact_pro)
+[![Mechatron Prime CI](https://img.shields.io/endpoint?url=https%3A%2F%2Fthelio-nixos.tail66c90.ts.net%2Fbadges%2Fcompact_pro.json&style=for-the-badge)](https://thelio-nixos.tail66c90.ts.net/mechatron-prime/)
 [![GitHub Actions](https://github.com/pmarreck/compact_pro/actions/workflows/ci.yml/badge.svg?branch=yolo)](https://github.com/pmarreck/compact_pro/actions/workflows/ci.yml)
 
 `compact_pro` is a clean-room, cross-platform Compact Pro (`.cpt`) implementation.
@@ -11,12 +11,13 @@
 
 ## CI Coverage
 
-- Garnix is flake-driven (no `garnix.yaml`): it builds flake `checks` target entries.
-- Linux x86_64 (Nix-based full test + build)
-- Linux aarch64 (Nix-based full test + build)
-- macOS aarch64 (Nix-based full test + build)
-- Windows x86_64 (native Zig test + build + CLI smoke test)
-- Windows aarch64 (cross-compile build check + artifact; runtime execution not yet validated on hosted ARM runner)
+- Mechatron Prime CI is the project's continuous-integration service: a self-hosted Nix build worker that builds every push to `yolo`. It builds the flake attributes listed in `.mechatron-prime/targets`:
+  - Linux x86_64: full unit and CLI test suite, plus a release build.
+  - Linux aarch64, Windows x86_64 and Windows aarch64: cross-compiled release builds.
+- GitHub Actions (`.github/workflows/ci.yml`) runs on native runners:
+  - Linux x86_64, Linux aarch64 and macOS aarch64: Nix-based full test suite and release build.
+  - Windows x86_64: Zig unit tests, release build and a CLI smoke test.
+  - Windows aarch64: cross-compiled build artifact (not executed).
 
 ## Build
 
