@@ -76,3 +76,24 @@ decoded chunks to a sink that updates the running CRC and forwards bytes.
   `verify` accepts. Undetected corruptions fell from 430 to 286. What remains
   is mainly footer damage (a damaged footer means no trailer is found),
   truncations that remove the footer, and the preamble volume bytes.
+
+## Decode speed pass results (2026-10-14)
+
+Single core, hyperfine 5 runs, ReleaseFast, 20 MB LZH archive unless noted:
+
+| Step | verify | expand |
+|---|---|---|
+| Baseline (`71b0b87`) | 544 ms | 524 ms |
+| Slice-by-16 CRC (`899d862`) | 421 ms | 404 ms |
+| Buffered bits + 10-bit Huffman tables (`41a43b5`) | 244 ms | 235 ms |
+
+Parallelism (`0f856f9`, `324f0ae`), 40-entry 38 MB archive: verify 387 -> 253
+ms, expand 379 -> 260 ms (largest entry, 20 MB, sets a ~242 ms floor). Verify
+peak RSS 9.2 MB (16-worker cap; 21.5 MB uncapped on 128 cores).
+
+Not done, with reasons: a bulk-refill bit reader measured ~2.6% and was
+reverted as not worth the interface. SIMD found no target: the remaining
+profile is the serial Huffman/LZ decode and the per-byte RLE state machine,
+both sequentially dependent by the format's definition; CRC is no longer a
+hotspot. Carry-less-multiply CRC would need per-architecture assembly for a
+share now under 2%.
