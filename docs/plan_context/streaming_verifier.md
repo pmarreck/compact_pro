@@ -97,3 +97,23 @@ profile is the serial Huffman/LZ decode and the per-byte RLE state machine,
 both sequentially dependent by the format's definition; CRC is no longer a
 hotspot. Carry-less-multiply CRC would need per-architecture assembly for a
 share now under 2%.
+
+## Verify throughput, baseline vs final (2026-10-14)
+
+No benchmark history exists for this repository, so gains are reported as
+throughput (uncompressed bytes / wall time). Single core (taskset), hyperfine
+7 runs, ReleaseFast, one host and session; baseline `71b0b87`, final `a0211a8`
+code:
+
+| Archive (codec) | Bytes | Baseline MB/s (ms) | Final MB/s (ms) | Ratio |
+|---|---|---|---|---|
+| geometric (LZH) | 945,591 | 32.8 (28.9) | 65.4 (14.4) | 2.00x |
+| Poisson (LZH) | 1,731,817 | 35.6 (48.6) | 79.5 (21.8) | 2.23x |
+| Poisson (LZH) | 3,459,791 | 36.7 (94.2) | 86.5 (40.0) | 2.35x |
+| geometric (LZH) | 20,000,000 | 37.0 (540.2) | 81.8 (244.6) | 2.21x |
+| exponential (RLE only) | 3,000,000 | 93.8 (32.0) | 227.3 (13.2) | 2.42x |
+
+Throughput is roughly constant across a 20x size range (linear cost); the
+smallest archive reads lower because fixed process startup dominates short
+runs. Standard deviations were at most 0.8% of the mean except the 20 MB
+baseline (4.2 ms).
