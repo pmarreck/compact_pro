@@ -62,3 +62,17 @@ decoded chunks to a sink that updates the running CRC and forwards bytes.
   in the preamble volume/cross-volume bytes (8, which no checksum covers).
 - Mutation check: breaking the data-fork overflow check, the streaming file
   CRC check, or the strict RLE run-length rule each fails the unit suite.
+
+## Metadata trailer CRC (2026-10-14)
+
+- Trailer version 2 stores a CRC-32 of the payload before the 16-byte footer.
+  `verify` fails on a mismatch. `expand` warns, skips metadata restore and still
+  extracts, because file data has its own CRCs and damaged timestamps or
+  permissions should not make intact data unextractable. `add` drops damaged
+  metadata rather than carrying it forward. Version 1 trailers are still read.
+- The stored CRC is checked in tests against gzip's CRC-32 of the same payload.
+- On version 2 archives from the oracle corpus (2540 mutations), `verify` now
+  rejects 2254 against `expand`'s 2108, with no case `expand` rejects that
+  `verify` accepts. Undetected corruptions fell from 430 to 286. What remains
+  is mainly footer damage (a damaged footer means no trailer is found),
+  truncations that remove the footer, and the preamble volume bytes.

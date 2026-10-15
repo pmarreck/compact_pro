@@ -142,7 +142,10 @@ enum {
 static const uint8_t meta_magic_v1[8] = { 'C', 'P', 'M', 'E', 'T', 'A', '1', '\n' };
 static const uint8_t meta_magic_v2[8] = { 'C', 'P', 'M', 'E', 'T', 'A', '2', '\n' };
 static const uint8_t meta_trailer_magic[8] = { 'C', 'P', 'X', 'T', 'R', 'L', 'R', '1' };
-static const uint32_t meta_trailer_version = 1;
+/* Trailer versions: 1 = [payload][footer]; 2 = [payload][crc32 LE of payload][footer].
+ * The 16-byte footer is magic, payload length (LE), version (LE). */
+static const uint32_t meta_trailer_version_v1 = 1;
+static const uint32_t meta_trailer_version = 2;
 static const uint32_t meta_root_index = 0xFFFFFFFFu;
 
 typedef struct {
@@ -1414,7 +1417,7 @@ static int append_metadata_trailer(
 	*out_archive = NULL;
 	*out_len = 0;
 	const size_t footer_len = 8 + 4 + 4;
-	size_t total_len = archive_len + meta_blob_len + footer_len;
+	size_t total_len = archive_len + meta_blob_len + 4 + footer_len;
 	uint8_t *buf = (uint8_t *)malloc(total_len);
 	if (buf == NULL) return fail("out of memory");
 
@@ -1423,6 +1426,8 @@ static int append_metadata_trailer(
 	off += archive_len;
 	memcpy(buf + off, meta_blob, meta_blob_len);
 	off += meta_blob_len;
+	write_u32_le(buf + off, cp_crc32(meta_blob, meta_blob_len));
+	off += 4;
 	memcpy(buf + off, meta_trailer_magic, 8);
 	off += 8;
 	write_u32_le(buf + off, (uint32_t)meta_blob_len);
@@ -1435,6 +1440,10 @@ static int append_metadata_trailer(
 	return 0;
 }
 
+/* Locates the appended metadata trailer, if any. `*base_archive_len` is set to
+ * the bytes before it. For a version 2 trailer, `*trailer_crc_ok` (optional)
+ * reports whether the payload matches its stored CRC-32; a version 1 trailer
+ * has no CRC and always reports 1. */
 static void split_archive_and_metadata(
 	const uint8_t *archive,
 	size_t archive_len,
@@ -1442,13 +1451,15 @@ static void split_archive_and_metadata(
 	size_t *base_archive_len,
 	const uint8_t **meta_blob,
 	size_t *meta_blob_len,
-	size_t *trailer_total_len
+	size_t *trailer_total_len,
+	int *trailer_crc_ok
 ) {
 	*base_archive = archive;
 	*base_archive_len = archive_len;
 	*meta_blob = NULL;
 	*meta_blob_len = 0;
 	if (trailer_total_len != NULL) *trailer_total_len = 0;
+	if (trailer_crc_ok != NULL) *trailer_crc_ok = 1;
 
 	const size_t footer_len = 8 + 4 + 4;
 	if (archive_len < footer_len) return;
@@ -1457,16 +1468,24 @@ static void split_archive_and_metadata(
 
 	uint32_t payload_len_u32 = read_u32_le(archive + footer_at + 8);
 	uint32_t version_u32 = read_u32_le(archive + footer_at + 12);
-	if (version_u32 != meta_trailer_version) return;
+	size_t crc_len = 0;
+	if (version_u32 == meta_trailer_version) {
+		crc_len = 4;
+	} else if (version_u32 != meta_trailer_version_v1) {
+		return;
+	}
 
 	size_t payload_len = (size_t)payload_len_u32;
-	if (payload_len > footer_at) return;
-	size_t payload_at = footer_at - payload_len;
+	if (payload_len + crc_len > footer_at) return;
+	size_t payload_at = footer_at - crc_len - payload_len;
 
 	*base_archive_len = payload_at;
 	*meta_blob = archive + payload_at;
 	*meta_blob_len = payload_len;
-	if (trailer_total_len != NULL) *trailer_total_len = payload_len + footer_len;
+	if (trailer_total_len != NULL) *trailer_total_len = payload_len + crc_len + footer_len;
+	if (crc_len != 0 && trailer_crc_ok != NULL) {
+		*trailer_crc_ok = read_u32_le(archive + payload_at + payload_len) == cp_crc32(archive + payload_at, payload_len);
+	}
 }
 
 static int path_depth(const char *path) {
@@ -2705,7 +2724,13 @@ static int cmd_expand(int argc, char **argv) {
 	size_t base_archive_len = archive_len;
 	const uint8_t *meta_blob = NULL;
 	size_t meta_blob_len = 0;
-	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob, &meta_blob_len, NULL);
+	int trailer_crc_ok = 1;
+	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob, &meta_blob_len, NULL, &trailer_crc_ok);
+	if (!trailer_crc_ok) {
+		fprintf(stderr, "warning: metadata trailer crc mismatch; metadata restore skipped\n");
+		meta_blob = NULL;
+		meta_blob_len = 0;
+	}
 
 	meta_record *meta_records = NULL;
 	size_t meta_count = 0;
@@ -2987,7 +3012,13 @@ static int cmd_add(int argc, char **argv) {
 	size_t base_archive_len = archive_len;
 	const uint8_t *meta_blob_in = NULL;
 	size_t meta_blob_in_len = 0;
-	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob_in, &meta_blob_in_len, NULL);
+	int trailer_crc_ok = 1;
+	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob_in, &meta_blob_in_len, NULL, &trailer_crc_ok);
+	if (!trailer_crc_ok) {
+		fprintf(stderr, "warning: metadata trailer crc mismatch; existing metadata dropped\n");
+		meta_blob_in = NULL;
+		meta_blob_in_len = 0;
+	}
 
 	meta_record *old_meta = NULL;
 	size_t old_meta_count = 0;
@@ -3223,7 +3254,7 @@ static int cmd_list(int argc, char **argv) {
 	const uint8_t *meta_blob = NULL;
 	size_t meta_blob_len = 0;
 	size_t trailer_total_len = 0;
-	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob, &meta_blob_len, &trailer_total_len);
+	split_archive_and_metadata(archive_bytes, archive_len, &base_archive, &base_archive_len, &meta_blob, &meta_blob_len, &trailer_total_len, NULL);
 	(void)meta_blob;
 
 	cp_archive_listing listing = {0};
@@ -3307,11 +3338,17 @@ static int verify_trailer(verify_input *in, uint64_t size, uint64_t *core_size) 
 	size_t got = 0;
 	if (verify_read_at(in, size - footer_len, footer, footer_len, &got) != 0 || got != footer_len) return fail("cannot read archive trailer");
 	if (memcmp(footer, meta_trailer_magic, 8) != 0) return 0;
-	if (read_u32_le(footer + 12) != meta_trailer_version) return 0;
+	uint32_t version = read_u32_le(footer + 12);
+	uint64_t crc_len = 0;
+	if (version == meta_trailer_version) {
+		crc_len = 4;
+	} else if (version != meta_trailer_version_v1) {
+		return 0;
+	}
 	uint64_t payload_len = read_u32_le(footer + 8);
-	if (payload_len > size - footer_len) return 0;
+	if (payload_len + crc_len > size - footer_len) return 0;
 
-	size_t tail_len = (size_t)(payload_len + footer_len);
+	size_t tail_len = (size_t)(payload_len + crc_len + footer_len);
 	uint8_t *tail = (uint8_t *)malloc(tail_len);
 	if (tail == NULL) return fail("out of memory");
 	if (verify_read_at(in, size - tail_len, tail, tail_len, &got) != 0 || got != tail_len) {
@@ -3322,11 +3359,14 @@ static int verify_trailer(verify_input *in, uint64_t size, uint64_t *core_size) 
 	size_t base_len = 0;
 	const uint8_t *blob = NULL;
 	size_t blob_len = 0;
-	split_archive_and_metadata(tail, tail_len, &base, &base_len, &blob, &blob_len, NULL);
+	int trailer_crc_ok = 1;
+	split_archive_and_metadata(tail, tail_len, &base, &base_len, &blob, &blob_len, NULL, &trailer_crc_ok);
 	meta_record *records = NULL;
 	size_t record_count = 0;
 	int rc = 0;
-	if (blob != NULL && parse_metadata_blob(blob, blob_len, &records, &record_count) != 0) {
+	if (!trailer_crc_ok) {
+		rc = fail("verify failed: metadata trailer crc mismatch");
+	} else if (blob != NULL && parse_metadata_blob(blob, blob_len, &records, &record_count) != 0) {
 		rc = fail("verify failed: malformed metadata trailer");
 	}
 	free_meta_records(records, record_count);

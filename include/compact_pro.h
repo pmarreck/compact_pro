@@ -197,6 +197,9 @@ int cp_archive_verify_stream_parallel(
 	cp_verify_summary *out_summary
 );
 
+/* Standard CRC-32 (ISO-HDLC, as used by gzip and zip) of `length` bytes. */
+uint32_t cp_crc32(const uint8_t *data, size_t length);
+
 void cp_buffer_free(cp_buffer *buffer);
 void cp_archive_output_free(cp_archive_output *archive);
 void cp_archive_listing_free(cp_archive_listing *listing);

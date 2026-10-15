@@ -75,13 +75,14 @@ list_a="$("./zig-out/bin/compact-pro" list "$tmp_dir/a.cpt")"
 trailer_magic="$(xxd -p -l 8 -s -16 "$tmp_dir/a.cpt" | tr -d '\n')"
 [[ "$trailer_magic" == "43505854524c5231" ]]
 trailer_version="$(xxd -p -l 4 -s -4 "$tmp_dir/a.cpt" | tr -d '\n')"
-[[ "$trailer_version" == "01000000" ]]
+[[ "$trailer_version" == "02000000" ]]
 
 payload_len_le="$(xxd -p -l 4 -s -8 "$tmp_dir/a.cpt" | tr -d '\n')"
 payload_len_be="${payload_len_le:6:2}${payload_len_le:4:2}${payload_len_le:2:2}${payload_len_le:0:2}"
 payload_len=$((16#$payload_len_be))
 archive_size=$(wc -c < "$tmp_dir/a.cpt")
-base_size=$((archive_size - payload_len - 16))
+# Version 2 trailer: payload, CRC-32 of the payload (4 bytes), 16-byte footer.
+base_size=$((archive_size - payload_len - 4 - 16))
 dd if="$tmp_dir/a.cpt" of="$tmp_dir/a-notrailer.cpt" bs=1 count="$base_size" status=none
 
 mkdir -p "$tmp_dir/out-a-notrailer"
@@ -246,9 +247,10 @@ verify_rc=0
 # verify must reject whatever expand rejects, including a damaged metadata
 # trailer: claim the whole file as trailer payload so the archive proper is empty.
 cp "$tmp_dir/a.cpt" "$tmp_dir/bad-trailer.cpt"
-bad_len=$(( $(stat -c %s "$tmp_dir/bad-trailer.cpt") - 16 ))
+bad_size=$(stat -c %s "$tmp_dir/bad-trailer.cpt")
+bad_len=$((bad_size - 4 - 16))
 printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' $((bad_len & 255)) $(((bad_len >> 8) & 255)) $(((bad_len >> 16) & 255)) $(((bad_len >> 24) & 255)))" |
-	dd of="$tmp_dir/bad-trailer.cpt" bs=1 seek=$((bad_len + 8)) conv=notrunc status=none
+	dd of="$tmp_dir/bad-trailer.cpt" bs=1 seek=$((bad_size - 16 + 8)) conv=notrunc status=none
 expand_bad_rc=0
 "./zig-out/bin/compact-pro" expand --no-progress "$tmp_dir/bad-trailer.cpt" -d "$tmp_dir/out-bad-trailer" >/dev/null 2>"$tmp_dir/expand-bad-trailer.err" || expand_bad_rc=$?
 [[ "$expand_bad_rc" != 0 ]]
@@ -269,3 +271,40 @@ lzh_rc=0
 "./zig-out/bin/compact-pro" verify "$tmp_dir/lzh-text.cpt" >/dev/null 2>"$tmp_dir/lzh-verify.err" || lzh_rc=$?
 [[ "$lzh_rc" == 1 ]]
 [[ "$(head -1 "$tmp_dir/lzh-verify.err")" == "error: verify failed: invalid lzh codebook (archive offset $((lzh_fork_at + 1)))" ]]
+
+# Metadata trailer v2 carries a CRC-32 of its payload. Damage there makes
+# verify fail; expand warns, skips metadata restore and still extracts data.
+cp "$tmp_dir/a.cpt" "$tmp_dir/trailer-crc.cpt"
+tc_size=$(stat -c %s "$tmp_dir/trailer-crc.cpt")
+tc_payload=$(od -An -tu4 --endian=little -j $((tc_size - 8)) -N4 "$tmp_dir/trailer-crc.cpt" | tr -d ' ')
+tc_payload_at=$((tc_size - 16 - 4 - tc_payload))
+tc_byte="$(xxd -p -l 1 -s "$tc_payload_at" "$tmp_dir/trailer-crc.cpt")"
+printf "$(printf '\\x%02x' $(( 0x$tc_byte ^ 0x01 )))" | dd of="$tmp_dir/trailer-crc.cpt" bs=1 seek="$tc_payload_at" conv=notrunc status=none
+tc_verify_rc=0
+"./zig-out/bin/compact-pro" verify "$tmp_dir/trailer-crc.cpt" >/dev/null 2>"$tmp_dir/trailer-crc-verify.err" || tc_verify_rc=$?
+[[ "$tc_verify_rc" == 1 ]]
+[[ "$(head -1 "$tmp_dir/trailer-crc-verify.err")" == "error: verify failed: metadata trailer crc mismatch" ]]
+mkdir -p "$tmp_dir/out-trailer-crc"
+"./zig-out/bin/compact-pro" expand --no-progress "$tmp_dir/trailer-crc.cpt" -d "$tmp_dir/out-trailer-crc" >/dev/null 2>"$tmp_dir/trailer-crc-expand.err"
+[[ "$(grep -c '^warning: metadata trailer crc mismatch; metadata restore skipped$' "$tmp_dir/trailer-crc-expand.err")" == 1 ]]
+cmp "$tmp_dir/input.txt" "$tmp_dir/out-trailer-crc/input.txt"
+
+# Version 1 trailers (no CRC) written by earlier releases stay readable.
+v1_size=$(stat -c %s "$tmp_dir/a.cpt")
+head -c $((v1_size - 16 - 4)) "$tmp_dir/a.cpt" >"$tmp_dir/a-v1.cpt"
+tail -c 16 "$tmp_dir/a.cpt" | head -c 12 >>"$tmp_dir/a-v1.cpt"
+printf '\x01\x00\x00\x00' >>"$tmp_dir/a-v1.cpt"
+[[ "$("./zig-out/bin/compact-pro" verify "$tmp_dir/a-v1.cpt")" == "$verify_out" ]]
+mkdir -p "$tmp_dir/out-a-v1"
+"./zig-out/bin/compact-pro" expand --no-progress "$tmp_dir/a-v1.cpt" -d "$tmp_dir/out-a-v1" >/dev/null 2>"$tmp_dir/a-v1-expand.err"
+cmp "$tmp_dir/input.txt" "$tmp_dir/out-a-v1/input.txt"
+[[ "$(stat --printf='%a' "$tmp_dir/out-a-v1/input.txt")" == "$mode_src" ]]
+
+# Independent oracle for the stored trailer CRC: gzip's trailer begins with
+# the standard CRC-32 (little-endian) of its input.
+g_size=$(stat -c %s "$tmp_dir/a.cpt")
+g_payload=$(od -An -tu4 --endian=little -j $((g_size - 8)) -N4 "$tmp_dir/a.cpt" | tr -d ' ')
+dd if="$tmp_dir/a.cpt" of="$tmp_dir/a-payload.bin" bs=1 skip=$((g_size - 16 - 4 - g_payload)) count="$g_payload" status=none
+stored_crc="$(xxd -p -l 4 -s $((g_size - 16 - 4)) "$tmp_dir/a.cpt")"
+gzip_crc="$(gzip -c "$tmp_dir/a-payload.bin" | tail -c 8 | head -c 4 | xxd -p)"
+[[ "$stored_crc" == "$gzip_crc" ]]

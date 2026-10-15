@@ -90,7 +90,7 @@ Usage:
     - live output renders phase bars with percent and ETA.
   - `--path <entry>` may be repeated to extract only selected entries.
   - Entries are decoded on all CPU cores (up to 16) through `cp_archive_extract_parallel`; output and errors are identical to `cp_archive_extract`.
-  - Restores file and directory metadata from the appended trailer when present.
+  - Restores file and directory metadata from the appended trailer when present. If the trailer's CRC-32 does not match, it prints `warning: metadata trailer crc mismatch; metadata restore skipped` and still extracts the (independently CRC-checked) file data.
   - Unsupported/unrestorable fields emit explicit warnings with the specific field name and do not abort data extraction.
 
 - `add`
@@ -134,6 +134,7 @@ Defaults:
 - Multi-block LZH writer now follows legacy block termination semantics (`block_count >= 0x1fff0` with token-cost overshoot permitted), matching The Unarchiver/`unar` expectations.
 - Container entry-count fields follow legacy Compact Pro subtree-count semantics for root/directory metadata traversal.
 - Metadata extension is appended as trailer bytes after canonical Compact Pro payload; legacy tools should ignore trailing bytes while this implementation restores metadata from that trailer.
+- Trailer layout (version 2): `[payload][CRC-32 of payload, LE u32][magic "CPXTRLR1"][payload length, LE u32][version = 2, LE u32]`. Version 1 trailers (no CRC field) from earlier releases are still read. `verify` fails on a version 2 CRC mismatch.
 
 ## Benchmarking
 

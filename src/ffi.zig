@@ -412,6 +412,11 @@ pub export fn cp_archive_verify_stream_parallel(
 	return cp_ok;
 }
 
+pub export fn cp_crc32(data: ?[*]const u8, length: usize) u32 {
+	const bytes = toConstSlice(data, length) catch return 0;
+	return ~@import("crc32jam.zig").jamcrc(bytes);
+}
+
 pub export fn cp_buffer_free(buffer: ?*CpBuffer) void {
 	if (buffer == null) return;
 	if (toMutableSlice(buffer.?.ptr, buffer.?.len)) |slice| allocator.free(slice);
