@@ -30,7 +30,32 @@ output=$(./zig-out/bin/compact-pro --help)
 
 tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/compact-pro-cli.XXXXXX")"
 home_tmp="$(mktemp -d "$HOME/.compact-pro-cli-home.XXXXXX")"
-trap 'rm -rf "$tmp_dir" "$home_tmp"' EXIT
+# Capture the whole suite's stderr. At exit every captured line must be an
+# expected kind: completion stats, or a platform metadata-restore warning
+# (Linux cannot set ctime, for example). Unexpected lines fail the suite; on
+# any failure the captured log is replayed on the real stderr (fd 3).
+exec 3>&2
+stderr_log="$tmp_dir/cli-stderr.log"
+exec 2>"$stderr_log"
+expected_stderr='^(stats: (compress|expand) .+|warning: metadata restore skipped for .+ \([a-z0-9_]+\))$'
+finish() {
+	local rc=$?
+	exec 2>&3
+	if [[ $rc -eq 0 ]]; then
+		# grep exits 0 only when it selected an unexpected line.
+		if grep -Ev "$expected_stderr" "$stderr_log" >"$tmp_dir/unexpected-stderr.log"; then
+			echo "FAIL: unexpected stderr from CLI tests:" >&2
+			cat "$tmp_dir/unexpected-stderr.log" >&2
+			rc=1
+		fi
+	else
+		echo "FAIL: CLI tests exited $rc; captured stderr follows:" >&2
+		cat "$stderr_log" >&2
+	fi
+	rm -rf "$tmp_dir" "$home_tmp"
+	exit "$rc"
+}
+trap finish EXIT
 
 printf 'hello compact-pro\n' >"$tmp_dir/input.txt"
 chmod 700 "$tmp_dir/input.txt"
@@ -308,3 +333,8 @@ dd if="$tmp_dir/a.cpt" of="$tmp_dir/a-payload.bin" bs=1 skip=$((g_size - 16 - 4 
 stored_crc="$(xxd -p -l 4 -s $((g_size - 16 - 4)) "$tmp_dir/a.cpt")"
 gzip_crc="$(gzip -c "$tmp_dir/a-payload.bin" | tail -c 8 | head -c 4 | xxd -p)"
 [[ "$stored_crc" == "$gzip_crc" ]]
+
+# The capture above must have seen the expected kinds (guards against a
+# vacuous classifier, e.g. if stderr stopped being captured).
+grep -Eq '^stats: compress ' "$stderr_log"
+grep -Eq '^stats: expand ' "$stderr_log"

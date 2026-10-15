@@ -37,3 +37,4 @@ Completed PLAN.md items retired by plan-retire, oldest retirement first.
 - [x] [Done Criteria (current milestone)] Optimization pass: speed up LZH encode match search via best-length candidate prefiltering, validate with full suite + benchmark rerun. (completed 2026-02-20 21:52 EST)
 - [x] [Continuity] Spec and fixture groundwork complete. (completed 2026-02-20 02:36 EST)
 - [x] [Done Criteria (current milestone)] Optimization pass: implement concurrent LZH block encoding pipeline (sequential match/token phase + parallel block Huffman/bitstream emission with ordered merge), and lock deterministic output with worker-limit regression tests. (completed 2026-02-20 23:16 EST)
+- [x] [Done Criteria (current milestone)] Upgrade CLI progress UX: byte-based `compress-read`, real `compress-encode` progress via core/FFI callback, progress bar rendering, and ETA output in live/non-live modes. (completed 2026-02-20 23:29 EST)
