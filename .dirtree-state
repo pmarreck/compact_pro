@@ -1,0 +1,37 @@
+# Dirtree: Stateful directory trees in the CLI for humans and LLMs. https://github.com/pmarreck/dirtree
+ver=1.2
+depth=2
+
+annotate=[
+	.github/workflows/ci.yml = GitHub Actions: Nix test/build on Linux and macOS, native Windows x86_64 test/smoke, Windows aarch64 cross build
+	.mechatron-prime/targets = Flake attributes Mechatron Prime CI builds on each push to yolo
+	COMPACT_PRO_CLEANROOM_SPEC.md = Clean-room Compact Pro binary/codec/container specification and host resource-fork policy
+	INTENT.md = Canonical project purpose: users, outcomes, scope/non-goals, constraints, success evidence, open questions
+	MEMORIES = Project-scoped durable lessons (frontmatter Markdown)
+	PLAN.md = Open work as one-line checkboxes; completed items retire to docs/PLAN_LOG.md
+	README.md = Project description, CI badges, CLI reference, behavior and compatibility notes
+	RULES.md = Always-on local implementation constraints
+	TERMINOLOGY.md = Project glossary: forks, sidecar, RLE, LZH, JAMCRC, metadata trailer, verify parity
+	bm = Benchmark vs zip/gzip (speed, ratio); appends tests/benchmark/history.tsv and flags drift
+	build = Build wrapper: ReleaseFast by default; --debug and --test
+	build.zig = Build graph: static lib, compact-pro CLI, unit/stream test roots, per-leaf inline test roots; ReleaseFast default
+	csrc/compact_pro_cli.c = C CLI (compress/expand/add/list/verify): all file, resource-fork and metadata I/O; metadata trailer v2 with CRC-32; progress bars, stats
+	docs/PLAN_LOG.md = Completed PLAN items retired by plan-retire
+	docs/plan_context/streaming_verifier.md = Streaming verifier requirements, acceptance rule and oracle design
+	fixtures/cpt/MacEnvy21.cpt = Real Compact Pro archive (LZH resource fork) used by parser/extract tests
+	flake.nix = Nix dev shell (zig, unar, hyperfine) and CI checks: Linux x86_64 tests, cross builds for Linux aarch64 and Windows, macOS check
+	fuzz = Fuzz entry point (placeholder; no campaigns yet)
+	include/compact_pro.h = Public C header: structs, archive API, range-source/fork-sink callbacks, verify summary with error_offset, error codes
+	src/byte_io.zig = Slice byte source/sink adapters shared by the source/sink-generic RLE and LZH decoders
+	src/core.zig = Pure archive engine: header parse, extract (sequential/parallel), create/add, bounded-memory verifyStream(+Parallel) with error offsets; picks RLE vs LZH per fork
+	src/crc32jam.zig = JAMCRC (CRC-32 without final xor) via comptime slice-by-16 tables; header and file CRCs
+	src/ffi.zig = C ABI over core: create/add/extract(+parallel)/list/verify_stream(+parallel)/crc32, free helpers, stable error codes and messages
+	src/lzh.zig = Compact Pro LZH codec: 8 KiB LZSS window, per-block Huffman codebooks; decoder uses 64-bit bit buffer + 10-bit lookup tables; encoder parallel (segmented tokenization, per-block emission), deterministic
+	src/main.zig = Zig entry shim calling the C CLI main; prints DEBUG BUILD banner in Debug mode
+	src/rle8182.zig = Compact Pro 0x81/0x82 RLE: vectorized run-scanning encoder; decodeStream generic over source/sink (decode = in-memory form)
+	test = Complete test entry point: Zig unit tests then CLI integration suite
+	tests/benchmark/history.tsv = Benchmark history written by ./bm (Feb 2026, compress/extract vs zip/gzip)
+	tests/cli/test_cli.sh = End-to-end CLI tests (all commands, metadata trailer, unar interop, verify parity); captures and classifies all stderr
+	tests/unit/stream_verify_tests.zig = Streaming/parallel verify and parallel extract tests: differential vs extractAll, exhaustive bit flips and truncations, offsets, bounded memory
+	tests/unit/zig_unit_tests.zig = Core unit tests: RLE/LZH round trips and regressions, deterministic parallel encode, archive semantics, fixture parse/extract hashes
+]

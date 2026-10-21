@@ -4,3 +4,4 @@ zig-out/
 .codescan
 result
 .direnv/
+MECHATRON_PRIME_CI.md
