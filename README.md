@@ -12,7 +12,8 @@
 
 - Mechatron Prime CI is the project's continuous-integration service: a self-hosted Nix build worker that builds every push to `yolo`. It builds the flake attributes listed in `.mechatron-prime/targets`:
   - Linux x86_64: full unit and CLI test suite, plus a release build.
-  - Linux aarch64, Windows x86_64 and Windows aarch64: cross-compiled release builds.
+  - macOS aarch64: full unit and CLI test suite, run natively on an aarch64-darwin Nix remote builder.
+  - Linux aarch64, Windows x86_64 and Windows aarch64: cross-compiled release builds (not executed).
 
 ## Build
 
