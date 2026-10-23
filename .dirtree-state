@@ -3,6 +3,7 @@ ver=1.2
 depth=2
 
 annotate=[
+	.github/workflows/ci.yml = Former GitHub Actions workflow, kept for reference; Actions is disabled for the repo
 	.mechatron-prime/targets = Flake attributes Mechatron Prime CI builds on each push to yolo
 	COMPACT_PRO_CLEANROOM_SPEC.md = Clean-room Compact Pro binary/codec/container specification and host resource-fork policy
 	INTENT.md = Canonical project purpose: users, outcomes, scope/non-goals, constraints, success evidence, open questions

@@ -63,7 +63,9 @@ These are owner directives; `RULES.md` holds the enforced invariants.
 - `./test`: Zig unit tests and the CLI integration suite, including `unar`
   interoperability, verify/expand parity and clean stderr.
 - Mechatron Prime CI, the project's only continuous-integration service, builds
-  `.mechatron-prime/targets` on every push to `yolo`.
+  `.mechatron-prime/targets` on every push to `yolo`. The old GitHub Actions
+  workflow stays in `.github/workflows/` for reference, but GitHub Actions is
+  disabled for the repository.
 - Changes to decoding are additionally checked against independent baselines:
   a seeded random corpus compared byte-for-byte with an earlier build, and
   `corruption_reader` mutation runs comparing outcomes. See

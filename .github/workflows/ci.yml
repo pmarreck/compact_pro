@@ -1,0 +1,104 @@
+name: ci
+
+on:
+  push:
+    branches: [ "yolo" ]
+  pull_request:
+
+jobs:
+  nix-test-and-build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact_name: compact-pro-linux-x86_64
+            artifact_path: zig-out/bin/compact-pro
+          - os: ubuntu-24.04-arm
+            artifact_name: compact-pro-linux-aarch64
+            artifact_path: zig-out/bin/compact-pro
+          - os: macos-14
+            artifact_name: compact-pro-macos-aarch64
+            artifact_path: zig-out/bin/compact-pro
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Run Full Test Suite
+        run: nix develop -c ./test
+
+      - name: Build Release Artifact
+        run: nix develop -c ./build
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
+          if-no-files-found: error
+
+  windows-x86_64:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Run Zig Unit Tests
+        shell: pwsh
+        run: zig build test -Doptimize=ReleaseFast
+
+      - name: Build Windows Release Artifact
+        shell: pwsh
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: CLI Smoke Test
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path .tmp-ci | Out-Null
+          Push-Location .tmp-ci
+          Set-Content -NoNewline -Encoding utf8NoBOM -Path input.txt -Value "hello from windows"
+          ../zig-out/bin/compact-pro.exe --help
+          ../zig-out/bin/compact-pro.exe compress -o a.cpt input.txt
+          ../zig-out/bin/compact-pro.exe expand a.cpt -d out
+          $srcHash = (Get-FileHash -Algorithm SHA256 input.txt).Hash
+          $dstHash = (Get-FileHash -Algorithm SHA256 out/input.txt).Hash
+          if ($srcHash -ne $dstHash) { throw "roundtrip mismatch" }
+          Pop-Location
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: compact-pro-windows-x86_64
+          path: zig-out/bin/compact-pro.exe
+          if-no-files-found: error
+
+  windows-arm64-cross-compile:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Cross-Compile Windows ARM64 Artifact (Build-Only)
+        run: nix develop -c zig build -Doptimize=ReleaseFast -Dtarget=aarch64-windows
+
+      - name: Upload Windows ARM64 Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: compact-pro-windows-aarch64-cross
+          path: zig-out/bin/compact-pro.exe
+          if-no-files-found: error

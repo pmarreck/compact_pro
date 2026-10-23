@@ -14,6 +14,7 @@
   - Linux x86_64: full unit and CLI test suite, plus a release build.
   - macOS aarch64: full unit and CLI test suite, run natively on an aarch64-darwin Nix remote builder.
   - Linux aarch64, Windows x86_64 and Windows aarch64: cross-compiled release builds (not executed).
+- `.github/workflows/ci.yml` is the earlier GitHub Actions workflow, kept for reference. GitHub Actions is disabled for this repository, so it does not run.
 
 ## Build
 
