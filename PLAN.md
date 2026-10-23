@@ -9,7 +9,8 @@
 - [x] Give LZH bitstream errors (bad codebook, bad Huffman code) their own C error codes and report the archive byte offset of any verify failure (validate request 2026-10-14). (done 2026-10-14 18:20 EDT)
 - [x] Put compact_pro on Mechatron Prime CI (targets manifest, webhook, dynamic badge) and retire the dead Garnix badge. (done 2026-10-14 20:18 EDT)
 - [x] Add a CRC to the metadata trailer (new trailer version; old versions stay readable) so `verify` and `expand` detect trailer damage, which 307 of 2540 corruption cases showed is currently invisible. (done 2026-10-14 20:08 EDT)
-- [ ] Investigate whether bytes after the Compact Pro header end, with no valid trailer, should be reported (115 truncations removing only the trailer footer pass today); needs real-archive evidence before any verdict.
+- [x] Report bytes after the Compact Pro data that are not a valid trailer as a CLI stderr warning (`data_end` in the C API) and otherwise ignore them. (done 2026-10-23 12:10 EDT)
+- [x] Publish under the MIT license and run CI only on Mechatron Prime CI (GitHub Actions workflow retired). (done 2026-10-23 12:10 EDT)
 - [x] Decode speed pass after the verifier lands: profile first, then table/carry-less-multiply CRC-32, table-driven Huffman decode, and SIMD where the profile shows a win; golden oracle must stay byte-identical. (done 2026-10-14 20:18 EDT)
 - [ ] When `./fuzz` gains real campaigns, use the 2026-09-29 mutation vocabulary (sniper, bolter, sparse shotgun, dense nuke) and record definition version plus parameters per run.
 - [ ] Keep any future verdict or severity output aligned with the shared validate verdict memory (FAIL, KNOWN_DEFECT, WARN, reach).
@@ -22,3 +23,4 @@
 
 - [x] Capture and assert the CLI suite's expected stderr (metadata warnings, stats lines) so `./test` output runs clean. (done 2026-10-14 20:14 EDT)
 - [ ] Adopt the shared `performance_profiling` engine (`./cg`, `./mg`, external history) in place of ad-hoc benchmark comparisons.
+- [ ] Evaluate the original Compact Pro in a 680x0 Mac emulator as an oracle for encrypted and multi-volume archives before supporting either.

@@ -3,10 +3,10 @@ ver=1.2
 depth=2
 
 annotate=[
-	.github/workflows/ci.yml = GitHub Actions: Nix test/build on Linux and macOS, native Windows x86_64 test/smoke, Windows aarch64 cross build
 	.mechatron-prime/targets = Flake attributes Mechatron Prime CI builds on each push to yolo
 	COMPACT_PRO_CLEANROOM_SPEC.md = Clean-room Compact Pro binary/codec/container specification and host resource-fork policy
 	INTENT.md = Canonical project purpose: users, outcomes, scope/non-goals, constraints, success evidence, open questions
+	LICENSE = MIT license text
 	MEMORIES = Project-scoped durable lessons (frontmatter Markdown)
 	PLAN.md = Open work as one-line checkboxes; completed items retire to docs/PLAN_LOG.md
 	README.md = Project description, CI badges, CLI reference, behavior and compatibility notes

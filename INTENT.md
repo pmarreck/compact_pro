@@ -50,14 +50,20 @@ These are owner directives; `RULES.md` holds the enforced invariants.
   trailer for host metadata that Compact Pro cannot store.
 - Not supported today: encrypted entries (reported as unsupported) and
   multi-volume archive authoring (format fields are known; writer policy is not
-  validated). See `COMPACT_PRO_CLEANROOM_SPEC.md`.
+  validated). See `COMPACT_PRO_CLEANROOM_SPEC.md`. Either would need an
+  independent oracle first; the candidate is the original Compact Pro running
+  in a 680x0 Macintosh emulator (BDFN, 2026-10-23).
+- Bytes after the Compact Pro data that are not a valid metadata trailer are
+  reported on stderr by the CLI and otherwise ignored; they do not fail
+  `verify` (BDFN, 2026-10-23).
+- The project is public under the MIT license (`LICENSE`).
 
 ## How success is verified
 
 - `./test`: Zig unit tests and the CLI integration suite, including `unar`
   interoperability, verify/expand parity and clean stderr.
-- Mechatron Prime CI builds `.mechatron-prime/targets` on every push to `yolo`;
-  GitHub Actions covers native macOS and Windows runs.
+- Mechatron Prime CI, the project's only continuous-integration service, builds
+  `.mechatron-prime/targets` on every push to `yolo`.
 - Changes to decoding are additionally checked against independent baselines:
   a seeded random corpus compared byte-for-byte with an earlier build, and
   `corruption_reader` mutation runs comparing outcomes. See
@@ -65,10 +71,8 @@ These are owner directives; `RULES.md` holds the enforced invariants.
 
 ## Open questions
 
-- Is support for encrypted entries or multi-volume authoring wanted?
-- Should bytes after the Compact Pro data with no valid metadata trailer be
-  reported, and with what verdict? Needs real-archive evidence (tracked in
-  `PLAN.md`).
-- Release and licensing intent: is a public release planned, and for whom?
+- Can an emulated original Compact Pro serve as a practical oracle for
+  encrypted and multi-volume archives (emulator, system software and Compact
+  Pro licensing, scripted operation)?
 
 Current work lives in [PLAN.md](PLAN.md).

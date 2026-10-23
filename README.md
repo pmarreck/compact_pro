@@ -1,7 +1,6 @@
 # compact_pro
 
 [![Mechatron Prime CI](https://img.shields.io/endpoint?url=https%3A%2F%2Fthelio-nixos.tail66c90.ts.net%2Fbadges%2Fcompact_pro.json&style=for-the-badge)](https://thelio-nixos.tail66c90.ts.net/mechatron-prime/)
-[![GitHub Actions](https://github.com/pmarreck/compact_pro/actions/workflows/ci.yml/badge.svg?branch=yolo)](https://github.com/pmarreck/compact_pro/actions/workflows/ci.yml)
 
 `compact_pro` is a clean-room, cross-platform Compact Pro (`.cpt`) implementation.
 
@@ -14,10 +13,6 @@
 - Mechatron Prime CI is the project's continuous-integration service: a self-hosted Nix build worker that builds every push to `yolo`. It builds the flake attributes listed in `.mechatron-prime/targets`:
   - Linux x86_64: full unit and CLI test suite, plus a release build.
   - Linux aarch64, Windows x86_64 and Windows aarch64: cross-compiled release builds.
-- GitHub Actions (`.github/workflows/ci.yml`) runs on native runners:
-  - Linux x86_64, Linux aarch64 and macOS aarch64: Nix-based full test suite and release build.
-  - Windows x86_64: Zig unit tests, release build and a CLI smoke test.
-  - Windows aarch64: cross-compiled build artifact (not executed).
 
 ## Build
 
@@ -134,6 +129,7 @@ Defaults:
 - Multi-block LZH writer now follows legacy block termination semantics (`block_count >= 0x1fff0` with token-cost overshoot permitted), matching The Unarchiver/`unar` expectations.
 - Container entry-count fields follow legacy Compact Pro subtree-count semantics for root/directory metadata traversal.
 - Metadata extension is appended as trailer bytes after canonical Compact Pro payload; legacy tools should ignore trailing bytes while this implementation restores metadata from that trailer.
+- Any other bytes after the Compact Pro data (before the trailer, or with no valid trailer) are reported by `expand`, `list`, `add` and `verify` as `warning: N trailing bytes after archive data at offset X ignored` and otherwise ignored; `add` does not carry them into the rebuilt archive. The C API exposes the boundary as `data_end` in `cp_archive_output`, `cp_archive_listing` and `cp_verify_summary`.
 - Trailer layout (version 2): `[payload][CRC-32 of payload, LE u32][magic "CPXTRLR1"][payload length, LE u32][version = 2, LE u32]`. Version 1 trailers (no CRC field) from earlier releases are still read. `verify` fails on a version 2 CRC mismatch.
 
 ## Benchmarking
@@ -145,3 +141,7 @@ Defaults:
   - compression performance (output size and `out/in` ratio)
 - Persists history to `tests/benchmark/history.tsv`.
 - Fails loudly on sudden drift (default 20%) versus the previous row unless accepted via `--accept` or `BENCH_ACCEPT=1`.
+
+## License
+
+MIT; see [LICENSE](LICENSE).
