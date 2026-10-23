@@ -334,6 +334,53 @@ stored_crc="$(xxd -p -l 4 -s $((g_size - 16 - 4)) "$tmp_dir/a.cpt")"
 gzip_crc="$(gzip -c "$tmp_dir/a-payload.bin" | tail -c 8 | head -c 4 | xxd -p)"
 [[ "$stored_crc" == "$gzip_crc" ]]
 
+# Bytes after the Compact Pro data that are not a valid metadata trailer are
+# reported on stderr and otherwise ignored. Expected offsets come from the
+# trailer footer arithmetic (tb_base), not from the implementation.
+trailing_warning() {
+	printf 'warning: %s trailing bytes after archive data at offset %s ignored' "$1" "$2"
+}
+tb_size=$(stat -c %s "$tmp_dir/a.cpt")
+tb_payload=$(od -An -tu4 --endian=little -j $((tb_size - 8)) -N4 "$tmp_dir/a.cpt" | tr -d " ")
+tb_base=$((tb_size - tb_payload - 4 - 16))
+head -c "$tb_base" "$tmp_dir/a.cpt" >"$tmp_dir/tb-notrailer.cpt"
+cp "$tmp_dir/tb-notrailer.cpt" "$tmp_dir/junk-notrailer.cpt"
+printf 'JUNK!!' >>"$tmp_dir/junk-notrailer.cpt"
+cp "$tmp_dir/a.cpt" "$tmp_dir/junk-after-trailer.cpt"
+printf 'JUNK!!' >>"$tmp_dir/junk-after-trailer.cpt"
+cat "$tmp_dir/tb-notrailer.cpt" >"$tmp_dir/junk-before-trailer.cpt"
+printf 'JUNK!!' >>"$tmp_dir/junk-before-trailer.cpt"
+tail -c $((tb_size - tb_base)) "$tmp_dir/a.cpt" >>"$tmp_dir/junk-before-trailer.cpt"
+for junk_case in junk-notrailer:6 junk-after-trailer:$((tb_size - tb_base + 6)) junk-before-trailer:6; do
+	junk_name="${junk_case%%:*}"
+	junk_count="${junk_case##*:}"
+	want_warning="$(trailing_warning "$junk_count" "$tb_base")"
+	"./zig-out/bin/compact-pro" verify "$tmp_dir/$junk_name.cpt" >"$tmp_dir/$junk_name-verify.out" 2>"$tmp_dir/$junk_name-verify.err"
+	[[ "$(cat "$tmp_dir/$junk_name-verify.out")" == "$verify_out" ]]
+	[[ "$(cat "$tmp_dir/$junk_name-verify.err")" == "$want_warning" ]]
+	"./zig-out/bin/compact-pro" list "$tmp_dir/$junk_name.cpt" >/dev/null 2>"$tmp_dir/$junk_name-list.err"
+	[[ "$(cat "$tmp_dir/$junk_name-list.err")" == "$want_warning" ]]
+	mkdir -p "$tmp_dir/out-$junk_name"
+	"./zig-out/bin/compact-pro" expand --no-progress "$tmp_dir/$junk_name.cpt" -d "$tmp_dir/out-$junk_name" >/dev/null 2>"$tmp_dir/$junk_name-expand.err"
+	cmp "$tmp_dir/input.txt" "$tmp_dir/out-$junk_name/input.txt"
+	[[ "$(grep -c '^warning: .* trailing bytes' "$tmp_dir/$junk_name-expand.err")" == 1 ]]
+	grep -qxF "$want_warning" "$tmp_dir/$junk_name-expand.err"
+done
+# A valid trailer after the junk is still found, so its metadata is restored.
+[[ "$(stat --printf='%a' "$tmp_dir/out-junk-before-trailer/input.txt")" == "$mode_src" ]]
+# add rebuilds the archive; it reports the junk and does not carry it over.
+cp "$tmp_dir/junk-notrailer.cpt" "$tmp_dir/junk-add.cpt"
+printf "extra\n" >"$tmp_dir/junk-extra.txt"
+"./zig-out/bin/compact-pro" add --no-progress "$tmp_dir/junk-add.cpt" "$tmp_dir/junk-extra.txt" >/dev/null 2>"$tmp_dir/junk-add.err"
+grep -qxF "$(trailing_warning 6 "$tb_base")" "$tmp_dir/junk-add.err"
+"./zig-out/bin/compact-pro" verify "$tmp_dir/junk-add.cpt" >/dev/null 2>"$tmp_dir/junk-add-verify.err"
+[[ ! -s "$tmp_dir/junk-add-verify.err" ]]
+# Clean archives produce no trailing-bytes warning.
+"./zig-out/bin/compact-pro" verify "$tmp_dir/a.cpt" >/dev/null 2>"$tmp_dir/clean-verify.err"
+[[ ! -s "$tmp_dir/clean-verify.err" ]]
+"./zig-out/bin/compact-pro" verify "$tmp_dir/tb-notrailer.cpt" >/dev/null 2>"$tmp_dir/clean-notrailer-verify.err"
+[[ ! -s "$tmp_dir/clean-notrailer-verify.err" ]]
+
 # The capture above must have seen the expected kinds (guards against a
 # vacuous classifier, e.g. if stderr stopped being captured).
 grep -Eq '^stats: compress ' "$stderr_log"

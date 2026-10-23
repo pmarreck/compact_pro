@@ -1440,6 +1440,14 @@ static int append_metadata_trailer(
 	return 0;
 }
 
+/* Reports bytes between the end of the Compact Pro data and the metadata
+ * trailer (or end of file). They are otherwise ignored. */
+static void warn_trailing_bytes(uint64_t data_end, uint64_t archive_len) {
+	if (data_end >= archive_len) return;
+	fprintf(stderr, "warning: %llu trailing bytes after archive data at offset %llu ignored\n",
+		(unsigned long long)(archive_len - data_end), (unsigned long long)data_end);
+}
+
 /* Locates the appended metadata trailer, if any. `*base_archive_len` is set to
  * the bytes before it. For a version 2 trailer, `*trailer_crc_ok` (optional)
  * reports whether the payload matches its stored CRC-32; a version 1 trailer
@@ -2763,6 +2771,7 @@ static int cmd_expand(int argc, char **argv) {
 		free(path_found);
 		return 1;
 	}
+	warn_trailing_bytes(extracted.data_end, base_archive_len);
 
 	if (s.mode == RSRC_EXPLICIT && path_count > 1) {
 		cp_archive_output_free(&extracted);
@@ -3074,6 +3083,7 @@ static int cmd_add(int argc, char **argv) {
 		free(inputs);
 		return 1;
 	}
+	warn_trailing_bytes(existing.data_end, base_archive_len);
 
 	size_t combined_count = existing.entry_count + built_count;
 	cp_entry_input *combined = (cp_entry_input *)calloc(combined_count, sizeof(*combined));
@@ -3264,6 +3274,7 @@ static int cmd_list(int argc, char **argv) {
 		fprintf(stderr, "error: cp_archive_list failed: %s\n", cp_error_string(rc));
 		return 1;
 	}
+	warn_trailing_bytes(listing.data_end, base_archive_len);
 
 	for (size_t i = 0; i < listing.entry_count; ++i) {
 		cp_list_entry *entry = &listing.entries_ptr[i];
@@ -3449,6 +3460,7 @@ static int cmd_verify(int argc, char **argv) {
 		}
 		return 1;
 	}
+	warn_trailing_bytes(summary.data_end, core_size);
 	printf("ok\tentries=%zu\tbytes=%llu\n", summary.entry_count, (unsigned long long)summary.total_uncompressed);
 	return 0;
 }

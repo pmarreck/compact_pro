@@ -41,6 +41,7 @@ pub const CpArchiveOutput = extern struct {
 	comment_len: usize,
 	entries_ptr: ?[*]CpEntryOutput,
 	entry_count: usize,
+	data_end: u64,
 };
 
 pub const CpListEntry = extern struct {
@@ -56,6 +57,7 @@ pub const CpArchiveListing = extern struct {
 	comment_len: usize,
 	entries_ptr: ?[*]CpListEntry,
 	entry_count: usize,
+	data_end: u64,
 };
 
 pub const CpProgressFn = ?*const fn (?*anyopaque, usize, usize) callconv(.c) void;
@@ -132,6 +134,7 @@ fn clearArchiveOutput(out: *CpArchiveOutput) void {
 	out.comment_len = 0;
 	out.entries_ptr = null;
 	out.entry_count = 0;
+	out.data_end = 0;
 }
 
 fn clearArchiveListing(out: *CpArchiveListing) void {
@@ -139,6 +142,7 @@ fn clearArchiveListing(out: *CpArchiveListing) void {
 	out.comment_len = 0;
 	out.entries_ptr = null;
 	out.entry_count = 0;
+	out.data_end = 0;
 }
 
 fn convertInputs(c_entries: ?[*]const CpEntryInput, count: usize) ConversionError![]core.EntryInput {
@@ -287,6 +291,7 @@ fn publishExtracted(extracted_in: core.ExtractedArchive, out: *CpArchiveOutput) 
 	out.comment_len = extracted.comment.len;
 	out.entries_ptr = if (c_entries.len == 0) null else c_entries.ptr;
 	out.entry_count = c_entries.len;
+	out.data_end = extracted.data_end;
 	allocator.free(entries_meta);
 	return cp_ok;
 }
@@ -327,6 +332,7 @@ pub export fn cp_archive_list(
 	out_listing.?.comment_len = parsed.comment.len;
 	out_listing.?.entries_ptr = if (c_entries.len == 0) null else c_entries.ptr;
 	out_listing.?.entry_count = c_entries.len;
+	out_listing.?.data_end = parsed.data_end;
 	allocator.free(entry_meta);
 	return cp_ok;
 }
@@ -344,6 +350,7 @@ pub const CpVerifySummary = extern struct {
 	entry_count: usize,
 	total_uncompressed: u64,
 	error_offset: u64,
+	data_end: u64,
 };
 
 const no_error_offset = std.math.maxInt(u64);
@@ -375,7 +382,7 @@ pub export fn cp_archive_verify_stream(
 	sink_ctx: ?*anyopaque,
 	out_summary: ?*CpVerifySummary,
 ) c_int {
-	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0, .error_offset = no_error_offset };
+	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0, .error_offset = no_error_offset, .data_end = 0 };
 	const src = source orelse return cp_err_invalid_argument;
 	if (src.read_at == null) return cp_err_invalid_argument;
 
@@ -387,7 +394,7 @@ pub export fn cp_archive_verify_stream(
 		if (out_summary) |s| s.error_offset = diag.error_offset orelse no_error_offset;
 		return mapError(err);
 	};
-	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed, .error_offset = no_error_offset };
+	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed, .error_offset = no_error_offset, .data_end = summary.data_end };
 	return cp_ok;
 }
 
@@ -397,7 +404,7 @@ pub export fn cp_archive_verify_stream_parallel(
 	workers: usize,
 	out_summary: ?*CpVerifySummary,
 ) c_int {
-	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0, .error_offset = no_error_offset };
+	if (out_summary) |s| s.* = .{ .entry_count = 0, .total_uncompressed = 0, .error_offset = no_error_offset, .data_end = 0 };
 	const src = source orelse return cp_err_invalid_argument;
 	if (src.read_at == null) return cp_err_invalid_argument;
 
@@ -408,7 +415,7 @@ pub export fn cp_archive_verify_stream_parallel(
 		if (out_summary) |s| s.error_offset = diag.error_offset orelse no_error_offset;
 		return mapError(err);
 	};
-	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed, .error_offset = no_error_offset };
+	if (out_summary) |s| s.* = .{ .entry_count = summary.entry_count, .total_uncompressed = summary.total_uncompressed, .error_offset = no_error_offset, .data_end = summary.data_end };
 	return cp_ok;
 }
 

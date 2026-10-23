@@ -39,6 +39,9 @@ pub const MetadataEntry = struct {
 pub const ParsedMetadata = struct {
 	comment: []u8,
 	entries: []MetadataEntry,
+	/// Archive offset just past the Compact Pro data (directory header and every
+	/// fork); bytes beyond it are trailing data such as the metadata trailer.
+	data_end: u64 = 0,
 
 	pub fn deinit(self: ParsedMetadata, allocator: std.mem.Allocator) void {
 		allocator.free(self.comment);
@@ -61,6 +64,7 @@ pub const ExtractedEntry = struct {
 pub const ExtractedArchive = struct {
 	comment: []u8,
 	entries: []ExtractedEntry,
+	data_end: u64 = 0,
 
 	pub fn deinit(self: ExtractedArchive, allocator: std.mem.Allocator) void {
 		allocator.free(self.comment);
@@ -123,6 +127,7 @@ pub const VerifyDiagnostics = struct {
 pub const VerifySummary = struct {
 	entry_count: usize,
 	total_uncompressed: u64,
+	data_end: u64 = 0,
 };
 
 /// Size of each of the two fixed streaming buffers (input cursor, output sink).
@@ -223,7 +228,9 @@ pub fn parseMetadata(allocator: std.mem.Allocator, archive: []const u8, strict_c
 	if (header_offset >= archive.len) return Error.InvalidHeaderOffset;
 
 	var reader = Reader{ .bytes = archive, .index = header_offset };
-	return parseHeader(allocator, &reader, strict_crc);
+	var parsed = try parseHeader(allocator, &reader, strict_crc);
+	parsed.data_end = dataEnd(parsed.entries, reader.index);
+	return parsed;
 }
 
 /// Walks the Compact Pro directory header (CRC, entry count, comment, nested
@@ -319,6 +326,17 @@ fn joinPath(allocator: std.mem.Allocator, prefix: []const u8, part: []const u8) 
 	return out;
 }
 
+/// End of the Compact Pro data: the later of the directory header end and the
+/// last fork byte, since writers may place the header before or after the forks.
+fn dataEnd(entries: []const MetadataEntry, header_end: u64) u64 {
+	var end = header_end;
+	for (entries) |e| {
+		const fork_end = @as(u64, e.fork_data_offset) + e.resource_compressed_len + e.data_compressed_len;
+		end = @max(end, fork_end);
+	}
+	return end;
+}
+
 /// Data fork bytes follow the resource fork; a sum past u32 is out of range
 /// rather than a wrapped pointer back into the archive.
 fn dataForkOffset(meta: MetadataEntry) Error!u32 {
@@ -372,6 +390,7 @@ pub fn extractAll(allocator: std.mem.Allocator, archive: []const u8, strict_crc:
 	return .{
 		.comment = try allocator.dupe(u8, metadata.comment),
 		.entries = try out_entries.toOwnedSlice(allocator),
+		.data_end = metadata.data_end,
 	};
 }
 
@@ -461,7 +480,7 @@ pub fn extractAllParallel(allocator: std.mem.Allocator, archive: []const u8, str
 		out.* = slot.entry.?;
 		slot.entry = null;
 	}
-	return .{ .comment = comment, .entries = entries };
+	return .{ .comment = comment, .entries = entries, .data_end = metadata.data_end };
 }
 
 const ExtractSlot = struct {
@@ -689,7 +708,7 @@ fn verifyStreamTracked(
 	for (metadata.entries, 0..) |meta, index| {
 		total += try verifyEntry(source, in_buf, out_buf, meta, index, strict_crc, sink, pos);
 	}
-	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total };
+	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total, .data_end = metadata.data_end };
 }
 
 /// Reads the preamble and directory header through `in_buf`, recording the
@@ -705,10 +724,12 @@ fn readArchiveHeader(allocator: std.mem.Allocator, source: RangeSource, in_buf: 
 
 	var header_cursor = RangeCursor.init(source, in_buf, header_offset, source.size);
 	var header = StreamReader{ .cursor = &header_cursor };
-	return parseHeader(allocator, &header, strict_crc) catch |err| {
+	var parsed = parseHeader(allocator, &header, strict_crc) catch |err| {
 		pos.* = if (err == Error.HeaderCrcMismatch) header_offset else header_cursor.pos;
 		return err;
 	};
+	parsed.data_end = dataEnd(parsed.entries, header_cursor.pos);
+	return parsed;
 }
 
 /// Decodes and CRC-checks one entry's resource and data forks with the
@@ -836,7 +857,7 @@ fn verifyParallelTracked(
 	defer allocator.free(header_buf);
 	const metadata = try readArchiveHeader(allocator, source, header_buf, strict_crc, pos);
 	defer metadata.deinit(allocator);
-	if (metadata.entries.len == 0) return .{ .entry_count = 0, .total_uncompressed = 0 };
+	if (metadata.entries.len == 0) return .{ .entry_count = 0, .total_uncompressed = 0, .data_end = metadata.data_end };
 
 	const wanted = if (requested_workers == 0) @min(std.Thread.getCpuCount() catch 1, verify_default_max_workers) else requested_workers;
 	const worker_count = @max(1, @min(@min(wanted, verify_max_workers), metadata.entries.len));
@@ -877,7 +898,7 @@ fn verifyParallelTracked(
 		}
 		total += o.bytes;
 	}
-	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total };
+	return .{ .entry_count = metadata.entries.len, .total_uncompressed = total, .data_end = metadata.data_end };
 }
 
 const EncodedForks = struct {

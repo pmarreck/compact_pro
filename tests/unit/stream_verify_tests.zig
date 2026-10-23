@@ -521,3 +521,52 @@ test "extractAllParallel equals extractAll for every single-bit flip and truncat
 		for ([_]usize{ 1, 3, 16 }) |workers| try expectSameExtraction(archive[0..len], workers);
 	}
 }
+
+/// Every archive-reading path must agree on where the Compact Pro data ends,
+/// and bytes appended after it must not move that boundary.
+fn expectDataEnd(archive: []const u8, want: u64) !void {
+	const parsed = try core.parseMetadata(allocator(), archive, true);
+	defer parsed.deinit(allocator());
+	try std.testing.expectEqual(want, parsed.data_end);
+
+	var extracted = try core.extractAll(allocator(), archive, true);
+	defer extracted.deinit(allocator());
+	try std.testing.expectEqual(want, extracted.data_end);
+
+	var parallel = try core.extractAllParallel(allocator(), archive, true, 3);
+	defer parallel.deinit(allocator());
+	try std.testing.expectEqual(want, parallel.data_end);
+
+	var src = MemorySource{ .bytes = archive, .max_chunk = 5 };
+	try std.testing.expectEqual(want, (try core.verifyStream(allocator(), src.source(), true, null, null)).data_end);
+	try std.testing.expectEqual(want, (try core.verifyStreamParallel(allocator(), src.source(), true, 3, null)).data_end);
+}
+
+test "data_end is the end of the Compact Pro data on every read path, ignoring appended bytes" {
+	const archive = try buildSampleArchive(allocator());
+	defer allocator().free(archive);
+	try expectDataEnd(archive, archive.len);
+
+	const padded = try std.mem.concat(allocator(), u8, &.{ archive, "trailing junk" });
+	defer allocator().free(padded);
+	try expectDataEnd(padded, archive.len);
+
+	// The last entry's forks end the file, so data_end must include their lengths.
+	const single_entries = [_]core.EntryInput{.{ .name = "one", .data = "data fork bytes", .resource = "rsrc" }};
+	const single = try core.createArchive(allocator(), &single_entries, "");
+	defer allocator().free(single);
+	const single_padded = try std.mem.concat(allocator(), u8, &.{ single, "zz" });
+	defer allocator().free(single_padded);
+	try expectDataEnd(single_padded, single.len);
+
+	const empty = try core.createArchive(allocator(), &.{}, "");
+	defer allocator().free(empty);
+	const empty_padded = try std.mem.concat(allocator(), u8, &.{ empty, "x" });
+	defer allocator().free(empty_padded);
+	try expectDataEnd(empty_padded, empty.len);
+
+	// Original Compact Pro writes the directory header after the fork data.
+	const fixture = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "fixtures/cpt/MacEnvy21.cpt", allocator(), .limited(1024 * 1024));
+	defer allocator().free(fixture);
+	try expectDataEnd(fixture, fixture.len);
+}

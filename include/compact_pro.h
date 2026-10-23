@@ -71,6 +71,7 @@ typedef struct {
 	size_t comment_len;
 	cp_entry_output *entries_ptr;
 	size_t entry_count;
+	uint64_t data_end; /* offset just past the Compact Pro data; later bytes are trailing */
 } cp_archive_output;
 
 typedef struct {
@@ -86,6 +87,7 @@ typedef struct {
 	size_t comment_len;
 	cp_list_entry *entries_ptr;
 	size_t entry_count;
+	uint64_t data_end; /* offset just past the Compact Pro data; later bytes are trailing */
 } cp_archive_listing;
 
 typedef void (*cp_progress_fn)(void *ctx, size_t done, size_t total);
@@ -171,6 +173,7 @@ typedef struct {
 	size_t entry_count;
 	uint64_t total_uncompressed;
 	uint64_t error_offset;
+	uint64_t data_end; /* on success: offset just past the Compact Pro data */
 } cp_verify_summary;
 
 /* Bounded-memory verification: reads the archive through `source`, decodes
